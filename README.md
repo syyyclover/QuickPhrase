@@ -12,7 +12,7 @@
 
 | 文件 | 说明 |
 | --- | --- |
-| `dist/QuickPhrase-1.0.0-setup.exe` | **安装包**（自带界面向导，内嵌主程序与卸载器） |
+| `dist/QuickPhrase-1.2.0-setup.exe` | **安装包**（自带界面向导，内嵌主程序与卸载器） |
 | `dist/QuickPhrase.exe` | 免安装绿色版主程序（可直接双击运行） |
 
 安装包只写 `HKEY_CURRENT_USER` 与用户目录，**不需要管理员权限、不弹 UAC**，
@@ -27,7 +27,7 @@ QuickPhrase.exe            启动后驻留托盘（首次运行会显示主界�
 QuickPhrase.exe --show     启动并显示主界面（快捷方式用的就是这个）
 QuickPhrase.exe --tray     强制静默驻留托盘（开机启动项用的就是这个）
 
-QuickPhrase-1.0.0-setup.exe /S    静默安装到默认位置
+QuickPhrase-1.2.0-setup.exe /S    静默安装到默认位置
 uninstall.exe /S [/PURGE]         静默卸载（/PURGE 连数据一起删）
 ```
 

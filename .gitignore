@@ -26,3 +26,7 @@
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# 不纳入版本库：单元测试与开发需求文档（本地保留）
+/tests/
+/QuickPhrase.md
