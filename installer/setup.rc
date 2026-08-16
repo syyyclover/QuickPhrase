@@ -1,0 +1,42 @@
+/* setup.rc —— 安装程序资源：图标、清单、版本信息，以及内嵌的两个 exe */
+#pragma code_page(65001)
+
+#include <windows.h>
+#include "installer/setup_res.h"
+
+IDI_SETUP ICON "res/setup.ico"
+
+1 24 "installer/setup.manifest"
+
+/* 内嵌负载：构建顺序保证这两个文件已经生成 */
+IDR_APP_EXE    RCDATA "build/QuickPhrase.exe"
+IDR_UNINST_EXE RCDATA "build/uninstall.exe"
+
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION     1,0,0,0
+PRODUCTVERSION  1,0,0,0
+FILEFLAGSMASK   0x3fL
+FILEFLAGS       0x0L
+FILEOS          VOS_NT_WINDOWS32
+FILETYPE        VFT_APP
+FILESUBTYPE     VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "080404b0"
+        BEGIN
+            VALUE "CompanyName",      "QuickPhrase"
+            VALUE "FileDescription",  "口径生成器 安装程序"
+            VALUE "FileVersion",      "1.0.0.0"
+            VALUE "InternalName",     "QuickPhrase-Setup"
+            VALUE "LegalCopyright",   "MIT License"
+            VALUE "OriginalFilename", "QuickPhrase-1.0.0-setup.exe"
+            VALUE "ProductName",      "口径生成器 QuickPhrase"
+            VALUE "ProductVersion",   "1.0.0.0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x804, 1200
+    END
+END

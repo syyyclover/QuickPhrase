@@ -1,0 +1,28 @@
+# 构建产物（全部由 Makefile 生成，make clean 可清除）
+/build/
+/dist/
+
+# mkicon.py 顺带生成的预览图，构建不依赖它
+/res/app.png
+
+# 编译中间件
+*.o
+*.obj
+*.res
+*.exe
+*.dll
+*.a
+*.lib
+*.pdb
+
+# 本地工具/编辑器配置
+/.claude/
+.vscode/
+.idea/
+*.swp
+*~
+
+# 系统垃圾
+.DS_Store
+Thumbs.db
+desktop.ini
