@@ -74,6 +74,16 @@ int qp_istarts(const wchar_t *hay, const wchar_t *prefix)
     return 1;
 }
 
+int qp_iends(const wchar_t *hay, const wchar_t *suffix)
+{
+    size_t hlen, slen;
+    if (!hay || !suffix || !*suffix) return 0;
+    hlen = wcslen(hay);
+    slen = wcslen(suffix);
+    if (slen > hlen) return 0;
+    return qp_icmp(hay + (hlen - slen), suffix) == 0;
+}
+
 int qp_is_blank(const wchar_t *s)
 {
     if (!s) return 1;
@@ -314,39 +324,47 @@ ParseRule *parse_rule_clone(const ParseRule *r)
 /* 条件规则                                                            */
 /* ================================================================== */
 
-ConditionRule *cond_rule_create(void)
+CondTerm *cond_term_create(void)
 {
-    ConditionRule *r = (ConditionRule *)calloc(1, sizeof(ConditionRule));
-    if (!r) return NULL;
-    qp_new_id(r->id, QP_ID_MAX, L"cr");
-    r->op = OP_CONTAINS;
-    return r;
+    CondTerm *t = (CondTerm *)calloc(1, sizeof(CondTerm));
+    if (!t) return NULL;
+    t->op = OP_CONTAINS;
+    return t;
 }
 
-static void cond_free_values(ConditionRule *r)
+static void cond_term_free_values(CondTerm *t)
 {
     int i;
-    if (!r || !r->match_values) return;
-    for (i = 0; i < r->match_value_count; ++i) free(r->match_values[i]);
-    free(r->match_values);
-    r->match_values = NULL;
-    r->match_value_count = 0;
+    if (!t || !t->match_values) return;
+    for (i = 0; i < t->match_value_count; ++i) free(t->match_values[i]);
+    free(t->match_values);
+    t->match_values = NULL;
+    t->match_value_count = 0;
 }
 
-void cond_rule_free(ConditionRule *r)
+void cond_term_free(CondTerm *t)
 {
-    if (!r) return;
-    cond_free_values(r);
-    free(r);
+    if (!t) return;
+    cond_term_free_values(t);
+    free(t);
 }
 
-void cond_rule_set_match(ConditionRule *r, const wchar_t *raw)
+static void cond_term_list_free(CondTerm *head)
+{
+    while (head) {
+        CondTerm *n = head->next;
+        cond_term_free(head);
+        head = n;
+    }
+}
+
+void cond_term_set_match(CondTerm *t, const wchar_t *raw)
 {
     const wchar_t *p, *start;
     wchar_t buf[QP_MATCH_MAX];
-    if (!r) return;
-    qp_strlcpy(r->match_value, raw ? raw : L"", QP_MATCH_MAX);
-    cond_free_values(r);
+    if (!t) return;
+    qp_strlcpy(t->match_value, raw ? raw : L"", QP_MATCH_MAX);
+    cond_term_free_values(t);
     if (!raw || !*raw) return;
 
     /* 逗号 / 中文逗号 / 顿号 / 分号 均视为分隔符 */
@@ -359,12 +377,12 @@ void cond_rule_set_match(ConditionRule *r, const wchar_t *raw)
             buf[len] = L'\0';
             qp_trim(buf);
             if (buf[0]) {
-                wchar_t **arr = (wchar_t **)realloc(r->match_values,
-                        (size_t)(r->match_value_count + 1) * sizeof(wchar_t *));
+                wchar_t **arr = (wchar_t **)realloc(t->match_values,
+                        (size_t)(t->match_value_count + 1) * sizeof(wchar_t *));
                 if (arr) {
-                    r->match_values = arr;
-                    r->match_values[r->match_value_count] = qp_wcsdup(buf);
-                    r->match_value_count++;
+                    t->match_values = arr;
+                    t->match_values[t->match_value_count] = qp_wcsdup(buf);
+                    t->match_value_count++;
                 }
             }
             if (!*p) break;
@@ -373,18 +391,128 @@ void cond_rule_set_match(ConditionRule *r, const wchar_t *raw)
     }
 }
 
+CondTerm *cond_term_clone(const CondTerm *t)
+{
+    CondTerm *c;
+    if (!t) return NULL;
+    c = (CondTerm *)calloc(1, sizeof(CondTerm));
+    if (!c) return NULL;
+    qp_strlcpy(c->trigger_segment_id, t->trigger_segment_id, QP_ID_MAX);
+    c->op = t->op;
+    c->negate = t->negate;
+    cond_term_set_match(c, t->match_value);
+    return c;
+}
+
+int cond_term_count(const CondTerm *head)
+{
+    int n = 0;
+    for (; head; head = head->next) ++n;
+    return n;
+}
+
+CondTerm *cond_term_at(CondTerm *head, int index)
+{
+    int i = 0;
+    if (index < 0) return NULL;
+    for (; head; head = head->next, ++i)
+        if (i == index) return head;
+    return NULL;
+}
+
+void cond_term_append(CondTerm **head, CondTerm *t)
+{
+    if (!head || !t) return;
+    t->next = NULL;
+    if (!*head) { *head = t; return; }
+    {
+        CondTerm *cur = *head;
+        while (cur->next) cur = cur->next;
+        cur->next = t;
+    }
+}
+
+int cond_term_remove_at(CondTerm **head, int index)
+{
+    CondTerm *cur, *prev = NULL;
+    int i = 0;
+    if (!head || index < 0) return 0;
+    cur = *head;
+    while (cur && i < index) { prev = cur; cur = cur->next; ++i; }
+    if (!cur) return 0;
+    if (prev) prev->next = cur->next;
+    else *head = cur->next;
+    cond_term_free(cur);
+    return 1;
+}
+
+void cond_term_list_clear(CondTerm **head)
+{
+    if (!head) return;
+    cond_term_list_free(*head);
+    *head = NULL;
+}
+
+ConditionRule *cond_rule_create(void)
+{
+    ConditionRule *r = (ConditionRule *)calloc(1, sizeof(ConditionRule));
+    if (!r) return NULL;
+    qp_new_id(r->id, QP_ID_MAX, L"cr");
+    r->join = COND_JOIN_ALL;
+    /* 新规则默认带一个空白条件项：界面上立刻有一行可填，且未填完不会命中 */
+    cond_term_append(&r->terms, cond_term_create());
+    return r;
+}
+
+void cond_rule_free(ConditionRule *r)
+{
+    if (!r) return;
+    cond_term_list_free(r->terms);
+    free(r);
+}
+
+void cond_rule_set_simple(ConditionRule *r, const wchar_t *trigger_id,
+                          CondOperator op, int negate, const wchar_t *match)
+{
+    CondTerm *t;
+    if (!r) return;
+    cond_term_list_free(r->terms);
+    r->terms = NULL;
+    r->join = COND_JOIN_ALL;
+    t = cond_term_create();
+    if (!t) return;
+    qp_strlcpy(t->trigger_segment_id, trigger_id ? trigger_id : L"", QP_ID_MAX);
+    t->op = op;
+    t->negate = negate ? 1 : 0;
+    cond_term_set_match(t, match);
+    cond_term_append(&r->terms, t);
+}
+
 ConditionRule *cond_rule_clone(const ConditionRule *r)
 {
     ConditionRule *c;
+    const CondTerm *t;
     if (!r) return NULL;
     c = (ConditionRule *)calloc(1, sizeof(ConditionRule));
     if (!c) return NULL;
     qp_strlcpy(c->id, r->id, QP_ID_MAX);
-    qp_strlcpy(c->trigger_segment_id, r->trigger_segment_id, QP_ID_MAX);
-    c->op = r->op;
+    c->join = r->join;
     qp_strlcpy(c->result_value, r->result_value, QP_RESULT_MAX);
-    cond_rule_set_match(c, r->match_value);
+    for (t = r->terms; t; t = t->next)
+        cond_term_append(&c->terms, cond_term_clone(t));
     return c;
+}
+
+void cond_rule_assign(ConditionRule *dst, const ConditionRule *src)
+{
+    const CondTerm *t;
+    if (!dst || !src || dst == src) return;
+    cond_term_list_free(dst->terms);
+    dst->terms = NULL;
+    dst->join = src->join;
+    qp_strlcpy(dst->result_value, src->result_value, QP_RESULT_MAX);
+    for (t = src->terms; t; t = t->next)
+        cond_term_append(&dst->terms, cond_term_clone(t));
 }
 
 /* ================================================================== */
@@ -923,26 +1051,62 @@ static int parse_rule_hit(const ParseRule *r, const wchar_t *input,
     return 1;
 }
 
-static int cond_rule_hit(const ConditionRule *r, const wchar_t *trigger_value)
+/* 单个条件项是否成立（已计入 negate） */
+static int cond_term_hit(const CondTerm *t, const wchar_t *trigger_value)
 {
-    int i;
-    if (!r) return 0;
+    int hit = 0, i;
+    if (!t) return 0;
     if (!trigger_value) trigger_value = L"";
-    switch (r->op) {
+    switch (t->op) {
     case OP_CONTAINS:
-        return r->match_value[0] && qp_istr(trigger_value, r->match_value) != NULL;
+        hit = t->match_value[0] && qp_istr(trigger_value, t->match_value) != NULL;
+        break;
     case OP_EQUALS:
         /* 允许匹配「等于空」 */
-        return qp_icmp(trigger_value, r->match_value) == 0;
+        hit = qp_icmp(trigger_value, t->match_value) == 0;
+        break;
     case OP_STARTS_WITH:
-        return r->match_value[0] && qp_istarts(trigger_value, r->match_value);
+        hit = t->match_value[0] && qp_istarts(trigger_value, t->match_value);
+        break;
+    case OP_ENDS_WITH:
+        hit = t->match_value[0] && qp_iends(trigger_value, t->match_value);
+        break;
     case OP_IN:
-        for (i = 0; i < r->match_value_count; ++i)
-            if (qp_icmp(trigger_value, r->match_values[i]) == 0) return 1;
-        return 0;
+        for (i = 0; i < t->match_value_count; ++i)
+            if (qp_icmp(trigger_value, t->match_values[i]) == 0) { hit = 1; break; }
+        break;
+    case OP_EMPTY:
+        hit = qp_is_blank(trigger_value);
+        break;
     default:
-        return 0;
+        hit = 0;
+        break;
     }
+    return t->negate ? !hit : hit;
+}
+
+/*
+ * 整条规则是否命中：条件项按 join 组合。
+ * 没有条件项 → 不命中（避免半成品规则无条件改写片段）。
+ * 条件项指向不存在的变量 → 该项一律不成立（连 negate 也不生效），
+ * 这样悬空规则永远不会凭空命中。
+ */
+static int cond_rule_hit(const EvalContext *ctx, const ConditionRule *r,
+                         wchar_t (*work)[QP_VALUE_MAX])
+{
+    const CondTerm *t;
+    if (!ctx || !r || !r->terms) return 0;
+    for (t = r->terms; t; t = t->next) {
+        int trig = eval_index_of_id(ctx, t->trigger_segment_id);
+        int hit = (trig >= 0 && trig < ctx->count)
+                    ? cond_term_hit(t, work[trig]) : 0;
+        if (r->join == COND_JOIN_ANY) {
+            if (hit) return 1;
+        } else if (!hit) {
+            return 0;
+        }
+    }
+    return r->join == COND_JOIN_ANY ? 0 : 1;
 }
 
 void eval_run(EvalContext *ctx)
@@ -1001,9 +1165,7 @@ void eval_run(EvalContext *ctx)
             const ConditionRule *r;
             if (!s) continue;
             for (r = s->condition_rules; r; r = r->next) {
-                int trig = eval_index_of_id(ctx, r->trigger_segment_id);
-                if (trig < 0 || trig >= ctx->count) continue;
-                if (!cond_rule_hit(r, work[trig])) continue;
+                if (!cond_rule_hit(ctx, r, work)) continue;
                 qp_strlcpy(derived[i], r->result_value, QP_VALUE_MAX);
                 derived_set[i] = 1;
                 break;
@@ -1118,9 +1280,31 @@ const wchar_t *cond_op_name(CondOperator op)
     case OP_CONTAINS:    return L"包含";
     case OP_EQUALS:      return L"等于";
     case OP_STARTS_WITH: return L"开头是";
+    case OP_ENDS_WITH:   return L"结尾是";
     case OP_IN:          return L"属于列表";
+    case OP_EMPTY:       return L"为空";
     default:             return L"?";
     }
+}
+
+/* 摘要里用的自然说法：取反时直接说「不包含」而不是「不满足 包含」 */
+const wchar_t *cond_op_phrase(CondOperator op, int negate)
+{
+    if (!negate) return cond_op_name(op);
+    switch (op) {
+    case OP_CONTAINS:    return L"不包含";
+    case OP_EQUALS:      return L"不等于";
+    case OP_STARTS_WITH: return L"开头不是";
+    case OP_ENDS_WITH:   return L"结尾不是";
+    case OP_IN:          return L"不属于列表";
+    case OP_EMPTY:       return L"不为空";
+    default:             return L"?";
+    }
+}
+
+int cond_op_needs_value(CondOperator op)
+{
+    return op != OP_EMPTY;
 }
 
 static const wchar_t *seg_name_by_id(const Template *t, const wchar_t *id)
@@ -1153,14 +1337,55 @@ void parse_rule_summary(const ParseRule *r, const Template *t, wchar_t *out, siz
     }
 }
 
-void cond_rule_summary(const ConditionRule *r, const Template *t, wchar_t *out, size_t cap)
+void cond_term_summary(const CondTerm *term, const Template *t, wchar_t *out, size_t cap)
 {
     if (!out || cap == 0) return;
     out[0] = L'\0';
+    if (!term) return;
+    if (cond_op_needs_value(term->op))
+        swprintf(out, cap, L"%ls %ls「%ls」",
+                 seg_name_by_id(t, term->trigger_segment_id),
+                 cond_op_phrase(term->op, term->negate), term->match_value);
+    else
+        swprintf(out, cap, L"%ls %ls",
+                 seg_name_by_id(t, term->trigger_segment_id),
+                 cond_op_phrase(term->op, term->negate));
+}
+
+void cond_rule_summary(const ConditionRule *r, const Template *t, wchar_t *out, size_t cap)
+{
+    const wchar_t *joiner;
+    const CondTerm *term;
+    size_t used;
+    int n = 0;
+
+    if (!out || cap == 0) return;
+    out[0] = L'\0';
     if (!r) return;
-    swprintf(out, cap, L"如果 %ls %ls「%ls」→ 内容 = 「%ls」",
-             seg_name_by_id(t, r->trigger_segment_id),
-             cond_op_name(r->op), r->match_value, r->result_value);
+
+    joiner = (r->join == COND_JOIN_ANY) ? L" 或 " : L" 且 ";
+    qp_strlcpy(out, L"如果 ", cap);
+    used = wcslen(out);
+    for (term = r->terms; term; term = term->next, ++n) {
+        wchar_t one[QP_MATCH_MAX + QP_LABEL_MAX + 32];
+        if (n > 0) {
+            qp_strlcpy(out + used, joiner, cap - used);
+            used += wcslen(out + used);
+        }
+        cond_term_summary(term, t, one, sizeof(one) / sizeof(one[0]));
+        qp_strlcpy(out + used, one, cap - used);
+        used += wcslen(out + used);
+        if (used + 8 >= cap) break;
+    }
+    if (n == 0) {
+        qp_strlcpy(out, L"（还没有设置条件）", cap);
+        used = wcslen(out);
+    }
+    if (used + 16 < cap) {
+        wchar_t tail[QP_RESULT_MAX + 32];
+        swprintf(tail, sizeof(tail) / sizeof(tail[0]), L" → 内容 = 「%ls」", r->result_value);
+        qp_strlcpy(out + used, tail, cap - used);
+    }
 }
 
 /* ================================================================== */
@@ -1217,9 +1442,7 @@ static void seed_add_cond(Segment *host, const Segment *trigger, CondOperator op
 {
     ConditionRule *r = cond_rule_create();
     if (!r || !host) { cond_rule_free(r); return; }
-    if (trigger) qp_strlcpy(r->trigger_segment_id, trigger->id, QP_ID_MAX);
-    r->op = op;
-    cond_rule_set_match(r, match);
+    cond_rule_set_simple(r, trigger ? trigger->id : L"", op, 0, match);
     qp_strlcpy(r->result_value, result, QP_RESULT_MAX);
     cond_rule_append(&host->condition_rules, r);
 }

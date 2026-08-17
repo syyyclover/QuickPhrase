@@ -113,6 +113,11 @@
 #define IDC_RL_OK               3111
 #define IDC_RL_CANCEL           3112
 #define IDC_RL_TIP              3113
+#define IDC_RL_JOIN             3114   /* 全部满足 / 任意满足 */
+#define IDC_RL_TERMLIST         3115   /* 条件项列表          */
+#define IDC_RL_TERM_ADD         3116
+#define IDC_RL_TERM_DEL         3117
+#define IDC_RL_NEGATE           3118   /* 「不满足」取反勾选  */
 
 /* 设置对话框 */
 #define IDC_SET_HOTKEY          3201

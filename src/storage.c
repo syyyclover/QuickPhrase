@@ -256,7 +256,9 @@ static const char *cond_op_key(CondOperator op)
     switch (op) {
     case OP_EQUALS:      return "equals";
     case OP_STARTS_WITH: return "startsWith";
+    case OP_ENDS_WITH:   return "endsWith";
     case OP_IN:          return "in";
+    case OP_EMPTY:       return "empty";
     case OP_CONTAINS:
     default:             return "contains";
     }
@@ -267,7 +269,9 @@ static CondOperator cond_op_from_key(const char *k)
     if (!k) return OP_CONTAINS;
     if (strcmp(k, "equals") == 0) return OP_EQUALS;
     if (strcmp(k, "startsWith") == 0) return OP_STARTS_WITH;
+    if (strcmp(k, "endsWith") == 0) return OP_ENDS_WITH;
     if (strcmp(k, "in") == 0) return OP_IN;
+    if (strcmp(k, "empty") == 0) return OP_EMPTY;
     return OP_CONTAINS;
 }
 
@@ -307,25 +311,47 @@ static cJSON *parse_rule_to_json(const ParseRule *r)
     return o;
 }
 
-static cJSON *cond_rule_to_json(const ConditionRule *r)
+static void cond_term_fill_json(cJSON *o, const CondTerm *t)
 {
-    cJSON *o = cJSON_CreateObject();
-    if (!o) return NULL;
-    json_add_w(o, "id", r->id);
-    json_add_w(o, "triggerSegmentId", r->trigger_segment_id);
-    cJSON_AddStringToObject(o, "operator", cond_op_key(r->op));
-    json_add_w(o, "matchValue", r->match_value);
-    if (r->op == OP_IN && r->match_value_count > 0) {
+    json_add_w(o, "triggerSegmentId", t->trigger_segment_id);
+    cJSON_AddStringToObject(o, "operator", cond_op_key(t->op));
+    json_add_w(o, "matchValue", t->match_value);
+    if (t->op == OP_IN && t->match_value_count > 0) {
         cJSON *arr = cJSON_AddArrayToObject(o, "matchValues");
         int i;
-        for (i = 0; arr && i < r->match_value_count; ++i) {
-            char *u8 = qp_wide_to_utf8_alloc(r->match_values[i]);
+        for (i = 0; arr && i < t->match_value_count; ++i) {
+            char *u8 = qp_wide_to_utf8_alloc(t->match_values[i]);
             if (u8) {
                 cJSON_AddItemToArray(arr, cJSON_CreateString(u8));
                 free(u8);
             }
         }
     }
+}
+
+static cJSON *cond_term_to_json(const CondTerm *t)
+{
+    cJSON *o = cJSON_CreateObject();
+    if (!o) return NULL;
+    cond_term_fill_json(o, t);
+    if (t->negate) cJSON_AddBoolToObject(o, "negate", 1);
+    return o;
+}
+
+static cJSON *cond_rule_to_json(const ConditionRule *r)
+{
+    cJSON *o = cJSON_CreateObject();
+    cJSON *arr;
+    const CondTerm *t;
+    if (!o) return NULL;
+    json_add_w(o, "id", r->id);
+    cJSON_AddStringToObject(o, "join", r->join == COND_JOIN_ANY ? "any" : "all");
+    arr = cJSON_AddArrayToObject(o, "conditions");
+    for (t = r->terms; arr && t; t = t->next)
+        cJSON_AddItemToArray(arr, cond_term_to_json(t));
+    /* 单条件且未取反时，同时写出老字段，旧版本仍能读懂这条规则 */
+    if (r->terms && !r->terms->next && !r->terms->negate)
+        cond_term_fill_json(o, r->terms);
     json_add_w(o, "resultValue", r->result_value);
     return o;
 }
@@ -443,22 +469,15 @@ static ParseRule *parse_rule_from_json(const cJSON *o)
     return r;
 }
 
-static ConditionRule *cond_rule_from_json(const cJSON *o)
+/* 读一个条件项的匹配值：优先 matchValues 数组，其次 matchValue 文本 */
+static void cond_term_read_match(CondTerm *t, const cJSON *o)
 {
-    ConditionRule *r = cond_rule_create();
-    const cJSON *arr;
-    if (!r) return NULL;
-    json_get_w(o, "id", r->id, QP_ID_MAX);
-    if (!r->id[0]) qp_new_id(r->id, QP_ID_MAX, L"cr");
-    json_get_w(o, "triggerSegmentId", r->trigger_segment_id, QP_ID_MAX);
-    r->op = cond_op_from_key(json_get_str(o, "operator", "contains"));
-
-    arr = cJSON_GetObjectItemCaseSensitive(o, "matchValues");
+    const cJSON *arr = cJSON_GetObjectItemCaseSensitive(o, "matchValues");
+    wchar_t raw[QP_MATCH_MAX];
+    raw[0] = L'\0';
     if (cJSON_IsArray(arr) && cJSON_GetArraySize(arr) > 0) {
         /* 由列表重建原始文本，再统一走 set_match 拆分 */
-        wchar_t raw[QP_MATCH_MAX];
         const cJSON *it;
-        raw[0] = L'\0';
         cJSON_ArrayForEach(it, arr) {
             wchar_t *w;
             if (!cJSON_IsString(it) || !it->valuestring) continue;
@@ -468,11 +487,45 @@ static ConditionRule *cond_rule_from_json(const cJSON *o)
             wcsncat(raw, w, QP_MATCH_MAX - wcslen(raw) - 1);
             free(w);
         }
-        cond_rule_set_match(r, raw);
     } else {
-        wchar_t raw[QP_MATCH_MAX];
         json_get_w(o, "matchValue", raw, QP_MATCH_MAX);
-        cond_rule_set_match(r, raw);
+    }
+    cond_term_set_match(t, raw);
+}
+
+static CondTerm *cond_term_from_json(const cJSON *o)
+{
+    CondTerm *t = cond_term_create();
+    if (!t) return NULL;
+    json_get_w(o, "triggerSegmentId", t->trigger_segment_id, QP_ID_MAX);
+    t->op = cond_op_from_key(json_get_str(o, "operator", "contains"));
+    t->negate = json_get_int(o, "negate", 0) ? 1 : 0;
+    cond_term_read_match(t, o);
+    return t;
+}
+
+static ConditionRule *cond_rule_from_json(const cJSON *o)
+{
+    ConditionRule *r = cond_rule_create();
+    const cJSON *arr;
+    if (!r) return NULL;
+    json_get_w(o, "id", r->id, QP_ID_MAX);
+    if (!r->id[0]) qp_new_id(r->id, QP_ID_MAX, L"cr");
+    r->join = (strcmp(json_get_str(o, "join", "all"), "any") == 0)
+                ? COND_JOIN_ANY : COND_JOIN_ALL;
+
+    /* cond_rule_create 预置了一个空白条件项，这里按文件内容重建 */
+    cond_term_list_clear(&r->terms);
+    arr = cJSON_GetObjectItemCaseSensitive(o, "conditions");
+    if (cJSON_IsArray(arr) && cJSON_GetArraySize(arr) > 0) {
+        const cJSON *it;
+        cJSON_ArrayForEach(it, arr) {
+            if (!cJSON_IsObject(it)) continue;
+            cond_term_append(&r->terms, cond_term_from_json(it));
+        }
+    } else {
+        /* 老格式：整条规则就是一个条件项 */
+        cond_term_append(&r->terms, cond_term_from_json(o));
     }
     json_get_w(o, "resultValue", r->result_value, QP_RESULT_MAX);
     return r;

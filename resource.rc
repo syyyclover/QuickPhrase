@@ -12,8 +12,8 @@ IDI_APPICON_SMALL ICON  "res/app.ico"
 1 24 "res/app.manifest"
 
 VS_VERSION_INFO VERSIONINFO
-FILEVERSION     1,3,0,0
-PRODUCTVERSION  1,3,0,0
+FILEVERSION     1,4,0,0
+PRODUCTVERSION  1,4,0,0
 FILEFLAGSMASK   0x3fL
 FILEFLAGS       0x0L
 FILEOS          VOS_NT_WINDOWS32
@@ -26,12 +26,12 @@ BEGIN
         BEGIN
             VALUE "CompanyName",      "QuickPhrase"
             VALUE "FileDescription",  "口径生成器 —— 结构化文案快速生成工具"
-            VALUE "FileVersion",      "1.3.0.0"
+            VALUE "FileVersion",      "1.4.0.0"
             VALUE "InternalName",     "QuickPhrase"
             VALUE "LegalCopyright",   "MIT License"
             VALUE "OriginalFilename", "QuickPhrase.exe"
             VALUE "ProductName",      "口径生成器 QuickPhrase"
-            VALUE "ProductVersion",   "1.3.0.0"
+            VALUE "ProductVersion",   "1.4.0.0"
         END
     END
     BLOCK "VarFileInfo"

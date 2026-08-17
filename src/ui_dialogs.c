@@ -60,6 +60,32 @@ static HWND make_dlg(const wchar_t *cls, WNDPROC proc, const wchar_t *title,
     return hwnd;
 }
 
+/*
+ * 模态窗口的关闭顺序很讲究：必须先把 owner 恢复可用并接管激活，再销毁自己。
+ * 否则销毁的那一刻整条 owner 链还都是 disabled 状态，Windows 只能把激活权
+ * 临时丢给 Z 序里的下一个窗口（嵌套对话框时就是主界面），随后又被抢回来，
+ * 视觉上就是「主界面闪一下」。
+ *
+ * 所以所有退出路径（确定 / 取消 / 标题栏关闭 / Esc / Alt+F4）都走 dlg_close，
+ * 并在 dlg_common 的 WM_DESTROY 里再兜一次底（例如 owner 被销毁时连带销毁）。
+ */
+static void dlg_release_owner(HWND hwnd)
+{
+    HWND owner = GetWindow(hwnd, GW_OWNER);
+    if (!owner || !IsWindow(owner)) return;
+    EnableWindow(owner, TRUE);
+    if (GetActiveWindow() == hwnd) SetActiveWindow(owner);
+}
+
+/* 关闭模态窗口：先「不改变激活地」隐藏自己，再把激活权交还 owner，最后销毁 */
+static void dlg_close(HWND hwnd)
+{
+    SetWindowPos(hwnd, NULL, 0, 0, 0, 0,
+                 SWP_HIDEWINDOW | SWP_NOSIZE | SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+    dlg_release_owner(hwnd);
+    DestroyWindow(hwnd);
+}
+
 static int run_modal(HWND owner, HWND dlg, const int *result)
 {
     int r;
@@ -68,10 +94,10 @@ static int run_modal(HWND owner, HWND dlg, const int *result)
     ShowWindow(dlg, SW_SHOW);
     UpdateWindow(dlg);
     r = qp_modal_loop(owner, dlg, result);
-    if (owner) {
+    /* 正常路径下 WM_DESTROY 已经把 owner 恢复并激活，这里只是兜底 */
+    if (owner && IsWindow(owner)) {
         EnableWindow(owner, TRUE);
         SetActiveWindow(owner);
-        SetForegroundWindow(owner);
     }
     return r;
 }
@@ -80,6 +106,9 @@ static LRESULT dlg_common(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, int *handle
 {
     *handled = 0;
     switch (msg) {
+    case WM_DESTROY:
+        dlg_release_owner(hwnd);
+        break;                       /* 不吞消息，继续交给 DefWindowProc */
     case WM_ERASEBKGND: {
         RECT rc;
         GetClientRect(hwnd, &rc);
@@ -237,18 +266,18 @@ static LRESULT CALLBACK input_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         if (LOWORD(wp) == IDOK) {
             qp_get_text(c->hEdit, c->buf, c->cap);
             c->result = 1;
-            DestroyWindow(hwnd);
+            dlg_close(hwnd);
             return 0;
         }
         if (LOWORD(wp) == IDCANCEL) {
             c->result = 0;
-            DestroyWindow(hwnd);
+            dlg_close(hwnd);
             return 0;
         }
         break;
     case WM_CLOSE:
         if (c) c->result = 0;
-        DestroyWindow(hwnd);
+        dlg_close(hwnd);
         return 0;
     default:
         break;
@@ -472,14 +501,14 @@ static LRESULT CALLBACK parse_dlg_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
             qp_get_text(c->hFill, buf, QP_VALUE_MAX);
             qp_strlcpy(c->rule->fill_value, buf, QP_VALUE_MAX);
             c->result = 1;
-            DestroyWindow(hwnd);
+            dlg_close(hwnd);
             return 0;
         }
-        if (LOWORD(wp) == IDCANCEL) { c->result = 0; DestroyWindow(hwnd); return 0; }
+        if (LOWORD(wp) == IDCANCEL) { c->result = 0; dlg_close(hwnd); return 0; }
         break;
     case WM_CLOSE:
         if (c) c->result = 0;
-        DestroyWindow(hwnd);
+        dlg_close(hwnd);
         return 0;
     default:
         break;
@@ -505,7 +534,16 @@ static int dlg_parse_rule(HWND owner, ParseRule *rule, const Template *t,
 
 /* ================================================================== */
 /* 条件规则编辑器                                                      */
+/*                                                                    */
+/* 一条规则 = 若干「条件项」 + 组合方式（全部 / 任意） + 输出内容。      */
+/* 列表选中一项，下面的编辑区即时改写它——不再另开一层弹窗。            */
 /* ================================================================== */
+
+/* 关系下拉的显示顺序（与枚举值解耦，以后插入新关系不影响存档） */
+static const CondOperator kCondOps[] = {
+    OP_CONTAINS, OP_EQUALS, OP_STARTS_WITH, OP_ENDS_WITH, OP_IN, OP_EMPTY
+};
+#define QP_COND_OP_COUNT ((int)(sizeof(kCondOps) / sizeof(kCondOps[0])))
 
 typedef struct {
     HWND hwnd;
@@ -513,8 +551,114 @@ typedef struct {
     const Template *tmpl;
     const Segment *owner_seg;
     int result;
-    HWND hTrigger, hOp, hMatch, hResult;
+    int loading;                 /* 1 = 正在往控件里灌值，忽略变更通知 */
+    HWND hJoin, hList, hResult;
+    HWND hTrigger, hOp, hNegate, hMatch;
+    HWND hTrigLbl, hOpLbl, hMatchLbl;
 } CondDlgCtx;
+
+static int cond_op_to_index(CondOperator op)
+{
+    int i;
+    for (i = 0; i < QP_COND_OP_COUNT; ++i)
+        if (kCondOps[i] == op) return i;
+    return 0;
+}
+
+static CondOperator cond_op_from_combo(HWND combo)
+{
+    int i = (int)SendMessageW(combo, CB_GETCURSEL, 0, 0);
+    if (i < 0 || i >= QP_COND_OP_COUNT) return OP_CONTAINS;
+    return kCondOps[i];
+}
+
+/* 刷新列表里某一行的摘要文字 */
+static void cond_row_text(CondDlgCtx *c, int row)
+{
+    wchar_t txt[QP_MATCH_MAX + QP_LABEL_MAX + 32];
+    wchar_t line[QP_MATCH_MAX + QP_LABEL_MAX + 48];
+    CondTerm *t = cond_term_at(c->rule->terms, row);
+    if (!t) return;
+    cond_term_summary(t, c->tmpl, txt, sizeof(txt) / sizeof(txt[0]));
+    _snwprintf(line, sizeof(line) / sizeof(line[0]), L"%d.  %ls", row + 1, txt);
+    line[sizeof(line) / sizeof(line[0]) - 1] = L'\0';
+    lv_set_row(c->hList, row, 0, line);
+}
+
+static void cond_sync_enable(CondDlgCtx *c)
+{
+    int on = cond_term_at(c->rule->terms, lv_sel(c->hList)) != NULL;
+    int needs = on && cond_op_needs_value(cond_op_from_combo(c->hOp));
+    EnableWindow(c->hTrigLbl, on);
+    EnableWindow(c->hTrigger, on);
+    EnableWindow(c->hOpLbl, on);
+    EnableWindow(c->hOp, on);
+    EnableWindow(c->hNegate, on);
+    EnableWindow(c->hMatchLbl, needs);
+    EnableWindow(c->hMatch, needs);
+    /* 至少留一个条件项，避免出现永远不会命中的空规则 */
+    EnableWindow(GetDlgItem(c->hwnd, IDC_RL_TERM_DEL),
+                 on && cond_term_count(c->rule->terms) > 1);
+}
+
+/* 把选中的条件项灌进编辑区 */
+static void cond_load_term(CondDlgCtx *c)
+{
+    int row = lv_sel(c->hList);
+    CondTerm *t = cond_term_at(c->rule->terms, row);
+
+    c->loading = 1;
+    if (t) {
+        fill_var_combo(c->hTrigger, c->tmpl, t->trigger_segment_id, c->owner_seg, 0);
+        SendMessageW(c->hOp, CB_SETCURSEL, (WPARAM)cond_op_to_index(t->op), 0);
+        CheckDlgButton(c->hwnd, IDC_RL_NEGATE, t->negate ? BST_CHECKED : BST_UNCHECKED);
+        SetWindowTextW(c->hMatch, t->match_value);
+    } else {
+        SendMessageW(c->hTrigger, CB_RESETCONTENT, 0, 0);
+        SendMessageW(c->hOp, CB_SETCURSEL, 0, 0);
+        CheckDlgButton(c->hwnd, IDC_RL_NEGATE, BST_UNCHECKED);
+        SetWindowTextW(c->hMatch, L"");
+    }
+    c->loading = 0;
+
+    /* 新条件项还没选变量：直接采纳下拉框里显示的那个，做到「看到的就是存下的」 */
+    if (t && !t->trigger_segment_id[0]) {
+        const Segment *s = combo_selected_seg(c->hTrigger);
+        if (s) {
+            qp_strlcpy(t->trigger_segment_id, s->id, QP_ID_MAX);
+            cond_row_text(c, row);
+        }
+    }
+    cond_sync_enable(c);
+}
+
+/* 把编辑区的内容写回选中的条件项 */
+static void cond_commit_term(CondDlgCtx *c)
+{
+    int row = lv_sel(c->hList);
+    CondTerm *t = cond_term_at(c->rule->terms, row);
+    const Segment *trig;
+    wchar_t buf[QP_MATCH_MAX];
+
+    if (c->loading || !t) return;
+    trig = combo_selected_seg(c->hTrigger);
+    qp_strlcpy(t->trigger_segment_id, trig ? trig->id : L"", QP_ID_MAX);
+    t->op = cond_op_from_combo(c->hOp);
+    t->negate = (IsDlgButtonChecked(c->hwnd, IDC_RL_NEGATE) == BST_CHECKED);
+    qp_get_text(c->hMatch, buf, QP_MATCH_MAX);
+    qp_trim(buf);
+    cond_term_set_match(t, buf);
+    cond_row_text(c, row);
+}
+
+static void cond_fill_terms(CondDlgCtx *c, int sel)
+{
+    int n = cond_term_count(c->rule->terms), i;
+    ListView_DeleteAllItems(c->hList);
+    for (i = 0; i < n; ++i) cond_row_text(c, i);
+    if (n > 0) lv_select(c->hList, sel);
+    cond_load_term(c);
+}
 
 static LRESULT CALLBACK cond_dlg_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
@@ -525,99 +669,199 @@ static LRESULT CALLBACK cond_dlg_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     switch (msg) {
     case WM_CREATE: {
         CREATESTRUCTW *cs = (CREATESTRUCTW *)lp;
-        int m = DPIX(14), lw = DPIX(84), y = DPIX(14), rowh = DPIX(28);
-        int cx, cw;
+        int m = DPIX(14), y = DPIX(14), rowh = DPIX(28);
+        int lw = DPIX(64), cx, cw, full, bw = DPIX(86);
         RECT rc;
-        HWND l1, l2, l3, l4, tip;
+        HWND lJoin, lWhen, lSect, lOut, tip, add, del;
+        int i;
 
         c = (CondDlgCtx *)cs->lpCreateParams;
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)c);
         c->hwnd = hwnd;
         GetClientRect(hwnd, &rc);
+        full = rc.right - m * 2;
         cx = m + lw + DPIX(8);
         cw = rc.right - m - cx;
 
-        l1 = mk_label_r(hwnd, L"当变量：", 0);
+        /* ---- 第一行：组合方式 + 增删按钮 ---- */
+        lJoin = mk_label(hwnd, L"当以下条件", 0);
+        c->hJoin = mk_combo(hwnd, IDC_RL_JOIN);
+        SendMessageW(c->hJoin, CB_ADDSTRING, 0, (LPARAM)L"全部满足（且）");
+        SendMessageW(c->hJoin, CB_ADDSTRING, 0, (LPARAM)L"任意满足（或）");
+        SendMessageW(c->hJoin, CB_SETCURSEL,
+                     c->rule->join == COND_JOIN_ANY ? 1 : 0, 0);
+        lWhen = mk_label(hwnd, L"时：", 0);
+        add = mk_btn(hwnd, L"添加条件", IDC_RL_TERM_ADD);
+        del = mk_btn(hwnd, L"删除条件", IDC_RL_TERM_DEL);
+
+        MoveWindow(lJoin, m, y + DPIX(5), DPIX(70), DPIX(18), TRUE);
+        MoveWindow(c->hJoin, m + DPIX(74), y, DPIX(126), DPIX(24), TRUE);
+        MoveWindow(lWhen, m + DPIX(204), y + DPIX(5), DPIX(28), DPIX(18), TRUE);
+        MoveWindow(add, rc.right - m - bw * 2 - DPIX(8), y, bw, DPIX(24), TRUE);
+        MoveWindow(del, rc.right - m - bw, y, bw, DPIX(24), TRUE);
+        y += DPIX(32);
+
+        /* ---- 条件项列表 ---- */
+        c->hList = mk_list(hwnd, IDC_RL_TERMLIST, LVS_NOCOLUMNHEADER);
+        lv_add_col(c->hList, 0, L"条件", 300);
+        MoveWindow(c->hList, m, y, full, DPIX(116), TRUE);
+        ListView_SetColumnWidth(c->hList, 0, full - DPIX(26));
+        y += DPIX(126);
+
+        /* ---- 选中条件项的编辑区 ---- */
+        lSect = mk_label(hwnd, L"编辑选中的条件：", 0);
+        MoveWindow(lSect, m, y, full, DPIX(18), TRUE);
+        y += DPIX(24);
+
+        c->hTrigLbl = mk_label_r(hwnd, L"变量：", 0);
         c->hTrigger = mk_combo(hwnd, IDC_RL_TRIGGER);
-        fill_var_combo(c->hTrigger, c->tmpl, c->rule->trigger_segment_id, c->owner_seg, 0);
+        MoveWindow(c->hTrigLbl, m, y + DPIX(4), lw, DPIX(18), TRUE);
+        MoveWindow(c->hTrigger, cx, y, cw, DPIX(24), TRUE);
+        y += rowh;
 
-        l2 = mk_label_r(hwnd, L"满足：", 0);
+        c->hOpLbl = mk_label_r(hwnd, L"关系：", 0);
         c->hOp = mk_combo(hwnd, IDC_RL_OP);
-        SendMessageW(c->hOp, CB_ADDSTRING, 0, (LPARAM)L"包含");
-        SendMessageW(c->hOp, CB_ADDSTRING, 0, (LPARAM)L"等于");
-        SendMessageW(c->hOp, CB_ADDSTRING, 0, (LPARAM)L"开头是");
-        SendMessageW(c->hOp, CB_ADDSTRING, 0, (LPARAM)L"属于其中之一");
-        SendMessageW(c->hOp, CB_SETCURSEL, (WPARAM)c->rule->op, 0);
+        for (i = 0; i < QP_COND_OP_COUNT; ++i)
+            SendMessageW(c->hOp, CB_ADDSTRING, 0, (LPARAM)cond_op_name(kCondOps[i]));
+        c->hNegate = mk_check(hwnd, L"不满足时才成立（取反）", IDC_RL_NEGATE);
+        MoveWindow(c->hOpLbl, m, y + DPIX(4), lw, DPIX(18), TRUE);
+        MoveWindow(c->hOp, cx, y, DPIX(120), DPIX(24), TRUE);
+        MoveWindow(c->hNegate, cx + DPIX(132), y + DPIX(2), cw - DPIX(132), DPIX(20), TRUE);
+        y += rowh;
 
-        l3 = mk_label_r(hwnd, L"匹配值：", 0);
+        c->hMatchLbl = mk_label_r(hwnd, L"匹配值：", 0);
         c->hMatch = mk_edit(hwnd, IDC_RL_MATCH, 0);
-        SetWindowTextW(c->hMatch, c->rule->match_value);
         SendMessageW(c->hMatch, EM_SETCUEBANNER, TRUE,
-                     (LPARAM)L"「属于其中之一」可用逗号 / 、 分隔多个值");
+                     (LPARAM)L"「属于列表」可用逗号 / 、 分隔多个值");
+        MoveWindow(c->hMatchLbl, m, y + DPIX(4), lw, DPIX(18), TRUE);
+        MoveWindow(c->hMatch, cx, y, cw, DPIX(24), TRUE);
+        y += DPIX(30);
 
-        l4 = mk_label_r(hwnd, L"则本片段：", 0);
+        tip = mk_label(hwnd,
+                       L"勾选「取反」可表达「不包含 / 不等于 / 不为空」；「为空」不需要匹配值。",
+                       IDC_RL_TIP);
+        MoveWindow(tip, m, y, full, DPIX(18), TRUE);
+        y += DPIX(26);
+
+        /* ---- 输出内容 ---- */
+        lOut = mk_label(hwnd, L"命中时，本片段的内容替换为：", 0);
+        MoveWindow(lOut, m, y, full, DPIX(18), TRUE);
+        y += DPIX(22);
         c->hResult = mk_edit(hwnd, IDC_RL_RESULT,
                              ES_MULTILINE | ES_WANTRETURN | ES_AUTOVSCROLL | WS_VSCROLL);
         SetWindowTextW(c->hResult, c->rule->result_value);
+        MoveWindow(c->hResult, m, y, full, DPIX(64), TRUE);
 
-        tip = mk_label(hwnd, L"多条规则按列表顺序判断，命中第一条即停止；都不命中时使用默认值。",
-                       IDC_RL_TIP);
         mk_btn(hwnd, L"确定", IDOK);
         mk_btn(hwnd, L"取消", IDCANCEL);
         SendMessageW(GetDlgItem(hwnd, IDOK), BM_SETSTYLE, BS_DEFPUSHBUTTON, TRUE);
-
-        MoveWindow(l1, m, y + DPIX(4), lw, DPIX(18), TRUE);
-        MoveWindow(c->hTrigger, cx, y, cw, DPIX(24), TRUE); y += rowh;
-        MoveWindow(l2, m, y + DPIX(4), lw, DPIX(18), TRUE);
-        MoveWindow(c->hOp, cx, y, DPIX(150), DPIX(24), TRUE); y += rowh;
-        MoveWindow(l3, m, y + DPIX(4), lw, DPIX(18), TRUE);
-        MoveWindow(c->hMatch, cx, y, cw, DPIX(24), TRUE); y += rowh;
-        MoveWindow(l4, m, y + DPIX(4), lw, DPIX(18), TRUE);
-        MoveWindow(c->hResult, cx, y, cw, DPIX(76), TRUE); y += DPIX(82);
-        MoveWindow(tip, m, y, rc.right - m * 2, DPIX(34), TRUE);
         MoveWindow(GetDlgItem(hwnd, IDOK), rc.right - m - DPIX(180),
-                   rc.bottom - m - DPIX(26), DPIX(86), DPIX(26), TRUE);
+                   rc.bottom - m - DPIX(26), bw, DPIX(26), TRUE);
         MoveWindow(GetDlgItem(hwnd, IDCANCEL), rc.right - m - DPIX(88),
-                   rc.bottom - m - DPIX(26), DPIX(86), DPIX(26), TRUE);
+                   rc.bottom - m - DPIX(26), bw, DPIX(26), TRUE);
 
         qp_theme_children(hwnd);
-        SetFocus(c->hTrigger);
+        cond_fill_terms(c, 0);
+        SetFocus(c->hList);
         return 0;
+    }
+    case WM_NOTIFY: {
+        NMHDR *nh = (NMHDR *)lp;
+        if (c && nh && nh->idFrom == IDC_RL_TERMLIST && nh->code == LVN_ITEMCHANGED) {
+            NMLISTVIEW *nv = (NMLISTVIEW *)lp;
+            if ((nv->uNewState & LVIS_SELECTED) && !(nv->uOldState & LVIS_SELECTED))
+                cond_load_term(c);
+        }
+        break;
     }
     case WM_COMMAND:
         qp_combo_dropdown_fix(wp, lp);
         if (!c) break;
-        if (LOWORD(wp) == IDOK) {
+        switch (LOWORD(wp)) {
+        case IDC_RL_JOIN:
+            if (HIWORD(wp) == CBN_SELCHANGE)
+                c->rule->join = (SendMessageW(c->hJoin, CB_GETCURSEL, 0, 0) == 1)
+                                ? COND_JOIN_ANY : COND_JOIN_ALL;
+            return 0;
+        case IDC_RL_TRIGGER:
+            if (HIWORD(wp) == CBN_SELCHANGE) cond_commit_term(c);
+            return 0;
+        case IDC_RL_OP:
+            if (HIWORD(wp) == CBN_SELCHANGE) { cond_commit_term(c); cond_sync_enable(c); }
+            return 0;
+        case IDC_RL_NEGATE:
+            if (HIWORD(wp) == BN_CLICKED) cond_commit_term(c);
+            return 0;
+        case IDC_RL_MATCH:
+            if (HIWORD(wp) == EN_CHANGE) cond_commit_term(c);
+            return 0;
+        case IDC_RL_TERM_ADD:
+            cond_term_append(&c->rule->terms, cond_term_create());
+            cond_fill_terms(c, cond_term_count(c->rule->terms) - 1);
+            SetFocus(c->hTrigger);
+            return 0;
+        case IDC_RL_TERM_DEL: {
+            int row = lv_sel(c->hList);
+            if (row >= 0 && cond_term_count(c->rule->terms) > 1) {
+                cond_term_remove_at(&c->rule->terms, row);
+                cond_fill_terms(c, row);
+            }
+            return 0;
+        }
+        case IDOK: {
             wchar_t buf[QP_RESULT_MAX];
-            const Segment *trig = combo_selected_seg(c->hTrigger);
-            int op = (int)SendMessageW(c->hOp, CB_GETCURSEL, 0, 0);
-            if (!trig) {
+            const CondTerm *t;
+            const Segment *sg;
+            int i = 0, nvar = 0;
+
+            /* 模板里一个变量都没有，条件规则无从下手（口径要先有变量） */
+            for (sg = c->tmpl->segments; sg; sg = sg->next)
+                if (sg != c->owner_seg && sg->type != SEG_STATIC) ++nvar;
+            if (nvar == 0) {
                 qp_msgbox(hwnd, MB_OK | MB_ICONWARNING, L"提示",
                           L"请先在模板中添加一个变量作为触发条件。");
                 return 0;
             }
-            if (op == CB_ERR) op = OP_CONTAINS;
-            qp_get_text(c->hMatch, buf, QP_RESULT_MAX);
-            qp_trim(buf);
-            if (!buf[0] && op != OP_EQUALS) {
-                qp_msgbox(hwnd, MB_OK | MB_ICONWARNING, L"提示", L"请填写匹配值。");
-                SetFocus(c->hMatch);
+            if (!c->rule->terms) {
+                qp_msgbox(hwnd, MB_OK | MB_ICONWARNING, L"提示",
+                          L"请至少添加一个条件。");
                 return 0;
             }
-            qp_strlcpy(c->rule->trigger_segment_id, trig->id, QP_ID_MAX);
-            c->rule->op = (CondOperator)op;
-            cond_rule_set_match(c->rule, buf);
+            for (t = c->rule->terms; t; t = t->next, ++i) {
+                if (!tmpl_find_segment(c->tmpl, t->trigger_segment_id)) {
+                    qp_msgbox(hwnd, MB_OK | MB_ICONWARNING, L"提示",
+                              L"第 %d 个条件还没有选择变量。", i + 1);
+                    lv_select(c->hList, i);
+                    SetFocus(c->hTrigger);
+                    return 0;
+                }
+                if (cond_op_needs_value(t->op) && !t->match_value[0]) {
+                    qp_msgbox(hwnd, MB_OK | MB_ICONWARNING, L"提示",
+                              L"第 %d 个条件（%ls）需要填写匹配值。\n"
+                              L"若想表达「这个变量是空的」，请把关系改成「为空」。",
+                              i + 1, cond_op_name(t->op));
+                    lv_select(c->hList, i);
+                    SetFocus(c->hMatch);
+                    return 0;
+                }
+            }
             qp_get_text(c->hResult, buf, QP_RESULT_MAX);
             qp_strlcpy(c->rule->result_value, buf, QP_RESULT_MAX);
             c->result = 1;
-            DestroyWindow(hwnd);
+            dlg_close(hwnd);
             return 0;
         }
-        if (LOWORD(wp) == IDCANCEL) { c->result = 0; DestroyWindow(hwnd); return 0; }
+        case IDCANCEL:
+            c->result = 0;
+            dlg_close(hwnd);
+            return 0;
+        default:
+            break;
+        }
         break;
     case WM_CLOSE:
         if (c) c->result = 0;
-        DestroyWindow(hwnd);
+        dlg_close(hwnd);
         return 0;
     default:
         break;
@@ -637,7 +881,7 @@ static int dlg_cond_rule(HWND owner, ConditionRule *rule, const Template *t,
     c.tmpl = t;
     c.owner_seg = owner_seg;
     dlg = make_dlg(L"QuickPhraseCondRule", cond_dlg_proc, L"条件规则",
-                   460, 300, owner, &c);
+                   520, 486, owner, &c);
     return run_modal(owner, dlg, &c.result);
 }
 
@@ -1126,19 +1370,8 @@ static void ed_cond_edit(EditorCtx *c)
     copy = cond_rule_clone(orig);
     if (!copy) return;
     if (dlg_cond_rule(c->hwnd, copy, c->t, s)) {
-        ConditionRule *keep = orig->next;
-        wchar_t id[QP_ID_MAX];
-        qp_strlcpy(id, orig->id, QP_ID_MAX);
-        /* 释放原对象自己的 match_values，再整体接管副本内容 */
-        {
-            int k;
-            for (k = 0; k < orig->match_value_count; ++k) free(orig->match_values[k]);
-            free(orig->match_values);
-        }
-        *orig = *copy;
-        qp_strlcpy(orig->id, id, QP_ID_MAX);
-        orig->next = keep;
-        free(copy);                 /* 内部指针已转移给 orig */
+        cond_rule_assign(orig, copy);   /* 保留 orig 的 id 与链表位置 */
+        cond_rule_free(copy);
         ed_fill_rulelists(c);
         lv_select(c->hCondList, i);
         ed_update_preview(c);
@@ -1414,12 +1647,12 @@ static LRESULT CALLBACK editor_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                          : NULL;
             qp_strlcpy(c->t->group_id, g ? g->id : L"", QP_ID_MAX);
             c->result = 1;
-            DestroyWindow(hwnd);
+            dlg_close(hwnd);
             return 0;
         }
         case IDCANCEL:
             c->result = 0;
-            DestroyWindow(hwnd);
+            dlg_close(hwnd);
             return 0;
         default:
             break;
@@ -1459,7 +1692,7 @@ static LRESULT CALLBACK editor_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
     case WM_CLOSE:
         if (c) c->result = 0;
-        DestroyWindow(hwnd);
+        dlg_close(hwnd);
         return 0;
 
     default:
@@ -1786,14 +2019,14 @@ static LRESULT CALLBACK settings_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             g_settings.autostart = app_get_autostart();
             app_save_settings();
             c->result = 1;
-            DestroyWindow(hwnd);
+            dlg_close(hwnd);
             return 0;
         }
-        if (LOWORD(wp) == IDCANCEL) { c->result = 0; DestroyWindow(hwnd); return 0; }
+        if (LOWORD(wp) == IDCANCEL) { c->result = 0; dlg_close(hwnd); return 0; }
         break;
     case WM_CLOSE:
         if (c) c->result = 0;
-        DestroyWindow(hwnd);
+        dlg_close(hwnd);
         return 0;
     default:
         break;

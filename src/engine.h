@@ -52,8 +52,16 @@ typedef enum {
     OP_CONTAINS = 0,
     OP_EQUALS = 1,
     OP_STARTS_WITH = 2,
-    OP_IN = 3
+    OP_IN = 3,
+    OP_ENDS_WITH = 4,
+    OP_EMPTY = 5          /* 为空；配合 negate 表达「不为空」 */
 } CondOperator;
+
+/* 条件项之间的组合方式 */
+typedef enum {
+    COND_JOIN_ALL = 0,    /* 全部满足（且） */
+    COND_JOIN_ANY = 1     /* 任意满足（或） */
+} CondJoin;
 
 /* ------------------------------------------------------------------ */
 /* 解析规则：挂在 text 变量上，从输入值提取信息去填充「目标变量」        */
@@ -71,14 +79,25 @@ typedef struct ParseRule {
 
 /* ------------------------------------------------------------------ */
 /* 条件规则：挂在任意片段上，控制该片段最终输出内容                     */
+/*                                                                    */
+/* 一条规则 = 若干「条件项」 + 一个结果值。条件项之间按 join 组合        */
+/* （全部满足 / 任意满足），每个条件项还可以单独取反（negate）。         */
+/* 只有一个未取反的条件项时，语义与老版本完全一致。                     */
 /* ------------------------------------------------------------------ */
-typedef struct ConditionRule {
-    wchar_t id[QP_ID_MAX];
+typedef struct CondTerm {
     wchar_t trigger_segment_id[QP_ID_MAX];
     CondOperator op;
+    int     negate;                       /* 1 = 不满足该条件时才算成立 */
     wchar_t match_value[QP_MATCH_MAX];    /* 单值 / OP_IN 时为原始文本 */
     wchar_t **match_values;               /* OP_IN 拆分后的列表        */
     int     match_value_count;
+    struct CondTerm *next;
+} CondTerm;
+
+typedef struct ConditionRule {
+    wchar_t id[QP_ID_MAX];
+    CondJoin join;
+    CondTerm *terms;
     wchar_t result_value[QP_RESULT_MAX];
     struct ConditionRule *next;
 } ConditionRule;
@@ -173,6 +192,7 @@ void     qp_strlcpy(wchar_t *dst, const wchar_t *src, size_t cap);
 int      qp_icmp(const wchar_t *a, const wchar_t *b);
 const wchar_t *qp_istr(const wchar_t *hay, const wchar_t *needle);
 int      qp_istarts(const wchar_t *hay, const wchar_t *prefix);
+int      qp_iends(const wchar_t *hay, const wchar_t *suffix);
 wchar_t *qp_wcsdup(const wchar_t *s);
 void     qp_trim(wchar_t *s);
 int      qp_is_blank(const wchar_t *s);
@@ -198,11 +218,25 @@ ParseRule     *parse_rule_create(void);
 void           parse_rule_free(ParseRule *r);
 ParseRule     *parse_rule_clone(const ParseRule *r);
 
-ConditionRule *cond_rule_create(void);
+ConditionRule *cond_rule_create(void);      /* 自带一个空白条件项 */
 void           cond_rule_free(ConditionRule *r);
 ConditionRule *cond_rule_clone(const ConditionRule *r);
+/* 把 src 的内容整体搬进 dst，保留 dst 的 id 与在链表中的位置 */
+void           cond_rule_assign(ConditionRule *dst, const ConditionRule *src);
+/* 便捷：整条规则只用一个条件项（老版本的单条件写法） */
+void           cond_rule_set_simple(ConditionRule *r, const wchar_t *trigger_id,
+                                    CondOperator op, int negate, const wchar_t *match);
+
+CondTerm      *cond_term_create(void);
+void           cond_term_free(CondTerm *t);
+CondTerm      *cond_term_clone(const CondTerm *t);
 /* 设置匹配值：OP_IN 时按 , ，、; 拆成列表 */
-void           cond_rule_set_match(ConditionRule *r, const wchar_t *raw);
+void           cond_term_set_match(CondTerm *t, const wchar_t *raw);
+int            cond_term_count(const CondTerm *head);
+CondTerm      *cond_term_at(CondTerm *head, int index);
+void           cond_term_append(CondTerm **head, CondTerm *t);
+int            cond_term_remove_at(CondTerm **head, int index);
+void           cond_term_list_clear(CondTerm **head);
 
 Template      *tmpl_create(const wchar_t *name);
 void           tmpl_free(Template *t);
@@ -267,10 +301,13 @@ size_t       tmpl_render_defaults(const Template *t, wchar_t *out, size_t cap);
 /* 供 UI / 存储层复用的枚举名称 */
 const wchar_t *seg_type_name(SegmentType t);
 const wchar_t *parse_type_name(ParseRuleType t);
-const wchar_t *cond_op_name(CondOperator op);
+const wchar_t *cond_op_name(CondOperator op);              /* 包含 / 等于 …   */
+const wchar_t *cond_op_phrase(CondOperator op, int negate);/* 不包含 / 不为空 … */
+int            cond_op_needs_value(CondOperator op);       /* OP_EMPTY 不需要值 */
 /* 规则摘要文字（列表显示用） */
 void parse_rule_summary(const ParseRule *r, const Template *t, wchar_t *out, size_t cap);
 void cond_rule_summary(const ConditionRule *r, const Template *t, wchar_t *out, size_t cap);
+void cond_term_summary(const CondTerm *term, const Template *t, wchar_t *out, size_t cap);
 /* 按 id 找片段（用于把 id 显示成变量名） */
 const Segment *tmpl_find_segment(const Template *t, const wchar_t *id);
 
