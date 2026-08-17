@@ -356,6 +356,7 @@ static cJSON *segment_to_json(const Segment *s)
             }
         }
         if (s->type == SEG_MULTI_SELECT) json_add_w(o, "separator", s->separator);
+        if (s->hidden) cJSON_AddBoolToObject(o, "hidden", 1);
     }
     if (s->parse_rules) {
         cJSON *arr = cJSON_AddArrayToObject(o, "parseRules");
@@ -490,6 +491,7 @@ static Segment *segment_from_json(const cJSON *o)
     json_get_w(o, "content", s->content, QP_CONTENT_MAX);
     json_get_w(o, "placeholder", s->placeholder, QP_PLACEHOLD_MAX);
     json_get_w(o, "defaultValue", s->default_value, QP_VALUE_MAX);
+    s->hidden = (type != SEG_STATIC && json_get_int(o, "hidden", 0)) ? 1 : 0;
     if (cJSON_GetObjectItemCaseSensitive(o, "separator")) {
         json_get_w(o, "separator", s->separator, QP_SEP_MAX);
         if (!s->separator[0]) qp_strlcpy(s->separator, L"、", QP_SEP_MAX);

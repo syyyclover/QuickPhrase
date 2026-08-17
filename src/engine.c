@@ -260,6 +260,7 @@ Segment *seg_clone(const Segment *s)
     qp_strlcpy(c->placeholder, s->placeholder, QP_PLACEHOLD_MAX);
     qp_strlcpy(c->separator, s->separator, QP_SEP_MAX);
     qp_strlcpy(c->default_value, s->default_value, QP_VALUE_MAX);
+    c->hidden = s->hidden;
     if (s->option_count > 0) {
         c->options = (wchar_t **)calloc((size_t)s->option_count, sizeof(wchar_t *));
         if (c->options) {
@@ -827,6 +828,19 @@ static const wchar_t *seg_default_of(const Segment *s)
     return L"";
 }
 
+/* 片段的「兜底值」：默认值优先；默认值为空（只靠变量匹配填充的变量）时，
+   保留上一次规则推导出的值，避免规则某一刻不再命中就在输出里留下空洞。
+   「重置」会清掉 sticky，回到真正的空。 */
+static const wchar_t *field_fallback_of(const EvalField *f)
+{
+    const wchar_t *d;
+    if (!f) return L"";
+    d = seg_default_of(f->seg);
+    if (d && *d) return d;
+    if (f->has_sticky && f->sticky[0]) return f->sticky;
+    return L"";
+}
+
 void eval_reset(EvalContext *ctx)
 {
     int i;
@@ -836,9 +850,11 @@ void eval_reset(EvalContext *ctx)
         f->user_touched = 0;
         f->user_override = 0;
         f->has_last_derived = 0;
+        f->has_sticky = 0;
         f->rule_driven = 0;
         f->user_value[0] = L'\0';
         f->last_derived[0] = L'\0';
+        f->sticky[0] = L'\0';
         qp_strlcpy(f->value, seg_default_of(f->seg), QP_VALUE_MAX);
     }
     eval_run(ctx);
@@ -952,7 +968,7 @@ void eval_run(EvalContext *ctx)
         if (f->user_touched)
             qp_strlcpy(work[i], f->user_value, QP_VALUE_MAX);
         else
-            qp_strlcpy(work[i], seg_default_of(f->seg), QP_VALUE_MAX);
+            qp_strlcpy(work[i], field_fallback_of(f), QP_VALUE_MAX);
     }
 
     /* 迭代求不动点：规则之间可能互相依赖 */
@@ -1005,7 +1021,7 @@ void eval_run(EvalContext *ctx)
             } else if (f->user_touched) {
                 qp_strlcpy(next, f->user_value, QP_VALUE_MAX);
             } else {
-                qp_strlcpy(next, seg_default_of(f->seg), QP_VALUE_MAX);
+                qp_strlcpy(next, field_fallback_of(f), QP_VALUE_MAX);
             }
             if (wcscmp(next, work[i]) != 0) {
                 qp_strlcpy(work[i], next, QP_VALUE_MAX);
@@ -1025,6 +1041,10 @@ void eval_run(EvalContext *ctx)
                                   wcscmp(derived[i], f->last_derived) == 0;
             qp_strlcpy(f->last_derived, derived[i], QP_VALUE_MAX);
             f->has_last_derived = 1;
+            if (derived[i][0]) {          /* 记住推导过的值，作为后续兜底 */
+                qp_strlcpy(f->sticky, derived[i], QP_VALUE_MAX);
+                f->has_sticky = 1;
+            }
             if (!override_active) f->user_override = 0;
         } else {
             f->has_last_derived = 0;

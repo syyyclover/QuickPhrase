@@ -96,6 +96,8 @@ typedef struct Segment {
     int     option_count;
     wchar_t separator[QP_SEP_MAX];        /* multi-select 拼接分隔符   */
     wchar_t default_value[QP_VALUE_MAX];
+    int     hidden;                       /* 1 = 填写界面不显示，只靠
+                                             变量匹配/默认值填充      */
     ParseRule *parse_rules;
     ConditionRule *condition_rules;
     struct Segment *next;
@@ -150,6 +152,9 @@ typedef struct EvalField {
     int     user_override;              /* 用户手动覆盖了规则推导值    */
     wchar_t last_derived[QP_VALUE_MAX]; /* 上次规则推导值              */
     int     has_last_derived;
+    wchar_t sticky[QP_VALUE_MAX];       /* 规则曾推导出的值（不随规则
+                                           失配而清空，见 eval_run）  */
+    int     has_sticky;
     int     rule_driven;                /* 本次求值是否由规则推导得到  */
 } EvalField;
 

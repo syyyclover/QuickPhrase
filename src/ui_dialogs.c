@@ -663,6 +663,7 @@ typedef struct {
     HWND hPlaceLbl, hPlace;
     HWND hDefLbl, hDef;
     HWND hSepLbl, hSep;
+    HWND hHidden;
 
     HWND hOptLbl, hOptList, hOptAdd, hOptEdit, hOptDel, hOptUp, hOptDown;
     HWND hParseLbl, hParseList, hParseAdd, hParseEdit, hParseDel, hParseUp, hParseDown;
@@ -683,6 +684,24 @@ static void ed_update_preview(EditorCtx *c)
     qp_set_text_if_diff(c->hPreview, out);
 }
 
+/* 片段列表里显示的摘要；隐藏的变量加个标记，一眼能看出它不出现在填写界面 */
+static void ed_seg_summary(const Segment *s, wchar_t *out, size_t cap)
+{
+    wchar_t *p;
+    if (!out || cap == 0) return;
+    out[0] = L'\0';
+    if (!s) return;
+    if (s->type == SEG_STATIC) {
+        qp_strlcpy(out, s->content, cap);
+    } else {
+        _snwprintf(out, cap, L"【%ls】%ls", seg_display_name(s),
+                   s->hidden ? L"（隐藏）" : L"");
+        out[cap - 1] = L'\0';
+    }
+    /* 列表里不显示换行 */
+    for (p = out; *p; ++p) if (*p == L'\r' || *p == L'\n') *p = L' ';
+}
+
 static void ed_fill_seglist(EditorCtx *c, int select_index)
 {
     Segment *s;
@@ -692,17 +711,7 @@ static void ed_fill_seglist(EditorCtx *c, int select_index)
     for (s = c->t->segments; s; s = s->next, ++i) {
         wchar_t num[16], summary[QP_CONTENT_MAX];
         _snwprintf(num, 16, L"%d", i + 1);
-        if (s->type == SEG_STATIC) {
-            qp_strlcpy(summary, s->content, QP_CONTENT_MAX);
-        } else {
-            _snwprintf(summary, QP_CONTENT_MAX, L"【%ls】", seg_display_name(s));
-            summary[QP_CONTENT_MAX - 1] = L'\0';
-        }
-        /* 列表里不显示换行 */
-        {
-            wchar_t *p;
-            for (p = summary; *p; ++p) if (*p == L'\r' || *p == L'\n') *p = L' ';
-        }
+        ed_seg_summary(s, summary, QP_CONTENT_MAX);
         lv_set_row(c->hSegList, i, 0, num);
         lv_set_row(c->hSegList, i, 1, seg_type_name(s->type));
         lv_set_row(c->hSegList, i, 2, summary);
@@ -750,7 +759,7 @@ static void ed_layout_props(EditorCtx *c)
     Segment *s = ed_cur_seg(c);
     RECT rc;
     int m = DPIX(12), x = DPIX(356), lw = DPIX(80);
-    int cx, cw, y = DPIX(68), rowh = DPIX(28);
+    int cx, cw, y = DPIX(68);
     int has = s != NULL;
     int t = has ? (int)s->type : -1;
     int show_label = has && t != SEG_STATIC;
@@ -758,6 +767,7 @@ static void ed_layout_props(EditorCtx *c)
     int show_place = has && (t == SEG_TEXT || t == SEG_MULTI_SELECT);
     int show_def = has && t != SEG_STATIC;
     int show_sep = has && t == SEG_MULTI_SELECT;
+    int show_hidden = has && t != SEG_STATIC;
     int show_opt = has && (t == SEG_SELECT || t == SEG_MULTI_SELECT);
     int show_parse = has && t == SEG_TEXT;
     int show_cond = has;
@@ -788,6 +798,13 @@ static void ed_layout_props(EditorCtx *c)
     ED_ROW(c->hPlaceLbl, c->hPlace, show_place, 24);
     ED_ROW(c->hDefLbl, c->hDef, show_def, 24);
     ED_ROW(c->hSepLbl, c->hSep, show_sep, 24);
+
+    /* 「隐藏」开关自带文字，不需要左侧标签，与其他控件左对齐即可 */
+    ShowWindow(c->hHidden, show_hidden ? SW_SHOW : SW_HIDE);
+    if (show_hidden) {
+        MoveWindow(c->hHidden, cx, y, cw, DPIX(22), TRUE);
+        y += DPIX(22) + DPIX(6);
+    }
 
     /* 选项 / 规则区：标题行（含右侧按钮）+ 列表 */
 #define ED_BLOCK(lbl, list, b1, b2, b3, b4, b5, show, listh)                   \
@@ -838,6 +855,8 @@ static void ed_load_props(EditorCtx *c)
         SetWindowTextW(c->hPlace, s->placeholder);
         SetWindowTextW(c->hDef, s->default_value);
         SetWindowTextW(c->hSep, s->separator);
+        SendMessageW(c->hHidden, BM_SETCHECK,
+                     s->hidden ? BST_CHECKED : BST_UNCHECKED, 0);
     } else {
         SendMessageW(c->hType, CB_SETCURSEL, (WPARAM)-1, 0);
         SetWindowTextW(c->hLabel, L"");
@@ -845,6 +864,7 @@ static void ed_load_props(EditorCtx *c)
         SetWindowTextW(c->hPlace, L"");
         SetWindowTextW(c->hDef, L"");
         SetWindowTextW(c->hSep, L"");
+        SendMessageW(c->hHidden, BM_SETCHECK, BST_UNCHECKED, 0);
     }
     ed_fill_optlist(c);
     ed_fill_rulelists(c);
@@ -867,6 +887,8 @@ static void ed_commit_props(EditorCtx *c)
     qp_strlcpy(s->default_value, buf, QP_VALUE_MAX);
     qp_get_text(c->hSep, buf, QP_SEP_MAX);
     qp_strlcpy(s->separator, buf, QP_SEP_MAX);
+    s->hidden = (s->type != SEG_STATIC &&
+                 SendMessageW(c->hHidden, BM_GETCHECK, 0, 0) == BST_CHECKED) ? 1 : 0;
     ed_update_preview(c);
 }
 
@@ -875,15 +897,8 @@ static void ed_refresh_cur_row(EditorCtx *c)
 {
     Segment *s = ed_cur_seg(c);
     wchar_t summary[QP_CONTENT_MAX];
-    wchar_t *p;
     if (!s) return;
-    if (s->type == SEG_STATIC)
-        qp_strlcpy(summary, s->content, QP_CONTENT_MAX);
-    else {
-        _snwprintf(summary, QP_CONTENT_MAX, L"【%ls】", seg_display_name(s));
-        summary[QP_CONTENT_MAX - 1] = L'\0';
-    }
-    for (p = summary; *p; ++p) if (*p == L'\r' || *p == L'\n') *p = L' ';
+    ed_seg_summary(s, summary, QP_CONTENT_MAX);
     lv_set_row(c->hSegList, c->cur, 1, seg_type_name(s->type));
     lv_set_row(c->hSegList, c->cur, 2, summary);
 }
@@ -946,6 +961,7 @@ static void ed_change_type(EditorCtx *c)
     int sel = (int)SendMessageW(c->hType, CB_GETCURSEL, 0, 0);
     if (!s || sel == CB_ERR || sel == (int)s->type) return;
     s->type = (SegmentType)sel;
+    if (s->type == SEG_STATIC) s->hidden = 0;   /* 固定句本来就不出现在填写界面 */
     if (s->type != SEG_STATIC && !s->label[0]) {
         wchar_t name[QP_LABEL_MAX];
         _snwprintf(name, QP_LABEL_MAX, L"变量%d", c->cur + 1);
@@ -1271,6 +1287,8 @@ static LRESULT CALLBACK editor_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         c->hDef = mk_edit(hwnd, IDC_ED_SEG_DEFAULT, 0);
         c->hSepLbl = mk_label_r(hwnd, L"分隔符：", 0);
         c->hSep = mk_edit(hwnd, IDC_ED_SEG_SEP, 0);
+        c->hHidden = mk_check(hwnd, L"在填写界面隐藏（只由变量匹配 / 默认值填充）",
+                              IDC_ED_SEG_HIDDEN);
 
         c->hOptLbl = mk_label(hwnd, L"选项", 0);
         c->hOptAdd = mk_btn(hwnd, L"添加", IDC_ED_OPT_ADD);
@@ -1348,6 +1366,12 @@ static LRESULT CALLBACK editor_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         case IDC_ED_SEG_DEFAULT:
         case IDC_ED_SEG_SEP:
             if (code == EN_CHANGE && !c->loading) {
+                ed_commit_props(c);
+                ed_refresh_cur_row(c);
+            }
+            return 0;
+        case IDC_ED_SEG_HIDDEN:
+            if (code == BN_CLICKED && !c->loading) {
                 ed_commit_props(c);
                 ed_refresh_cur_row(c);
             }

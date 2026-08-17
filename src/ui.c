@@ -1257,6 +1257,13 @@ static void ui_clear_fields(void)
     }
 }
 
+/* 填写界面是否给该片段建控件：固定句不需要；勾了「在填写界面隐藏」的
+   变量也不需要（只靠变量匹配/默认值填充，但照常参与输出）。 */
+static int seg_needs_input(const Segment *s)
+{
+    return s && s->type != SEG_STATIC && !s->hidden;
+}
+
 static void ui_build_fields(void)
 {
     int i, count = 0, y = DPIX(10), rowH = DPIX(30);
@@ -1266,7 +1273,7 @@ static void ui_build_fields(void)
     if (!g_ctx || !g_hHost) return;
 
     for (i = 0; i < g_ctx->count; ++i)
-        if (g_ctx->fields[i].seg && g_ctx->fields[i].seg->type != SEG_STATIC) ++count;
+        if (seg_needs_input(g_ctx->fields[i].seg)) ++count;
     if (count == 0) {
         g_hostContentH = 0;
         host_update_scroll();
@@ -1284,7 +1291,7 @@ static void ui_build_fields(void)
         const Segment *seg = g_ctx->fields[i].seg;
         FieldCtl *f;
         int ctlId;
-        if (!seg || seg->type == SEG_STATIC) continue;
+        if (!seg_needs_input(seg)) continue;
 
         f = &g_fields[g_fieldCount];
         f->field_index = i;
@@ -1345,22 +1352,32 @@ static void ui_sync_controls(void)
         const Segment *seg = ef->seg;
         if (!seg) continue;
         if (seg->type == SEG_SELECT) {
-            int idx = (int)SendMessageW(f->hCtl, CB_FINDSTRINGEXACT, (WPARAM)-1,
-                                        (LPARAM)ef->value);
+            /* 控件必须严格跟随引擎里的值：值为空时也要清掉选中态，
+               否则界面上还留着上一次匹配到的文字，看着「已填」，
+               实际预览里那一段是空的（点一下才恢复正常）。 */
+            int idx = ef->value[0]
+                        ? (int)SendMessageW(f->hCtl, CB_FINDSTRINGEXACT, (WPARAM)-1,
+                                            (LPARAM)ef->value)
+                        : CB_ERR;
+            if (f->extraIndex >= 0 && idx != f->extraIndex) {
+                /* 上次为显示而临时加入的项已经过期 → 撤掉。
+                   临时项总是加在末尾，删除它不会影响正式选项的索引。 */
+                SendMessageW(f->hCtl, CB_DELETESTRING, (WPARAM)f->extraIndex, 0);
+                f->extraIndex = -1;
+                if (ef->value[0])
+                    idx = (int)SendMessageW(f->hCtl, CB_FINDSTRINGEXACT, (WPARAM)-1,
+                                            (LPARAM)ef->value);
+            }
             if (idx == CB_ERR && ef->value[0]) {
                 /* 规则推导出的值不在选项列表中 → 临时加入以便显示。
                    只保留「一个」临时项：解析规则的 fill_value 为空时推导值会
                    跟着输入逐字变化，旧实现每次刷新都 CB_ADDSTRING，下拉列表
                    会随敲键无限膨胀。 */
-                if (f->extraIndex >= 0) {
-                    SendMessageW(f->hCtl, CB_DELETESTRING, (WPARAM)f->extraIndex, 0);
-                    f->extraIndex = -1;
-                }
                 idx = (int)SendMessageW(f->hCtl, CB_ADDSTRING, 0, (LPARAM)ef->value);
                 if (idx >= 0) f->extraIndex = idx;
             }
-            if (idx != CB_ERR &&
-                (int)SendMessageW(f->hCtl, CB_GETCURSEL, 0, 0) != idx)
+            if (idx < 0) idx = -1;                    /* CB_ERR / 空值 → 不选中 */
+            if ((int)SendMessageW(f->hCtl, CB_GETCURSEL, 0, 0) != idx)
                 SendMessageW(f->hCtl, CB_SETCURSEL, (WPARAM)idx, 0);
         } else {
             /* 只有正在输入的文本框才跳过刷新（避免光标跳动）。多选的只读框

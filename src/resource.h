@@ -97,6 +97,7 @@
 #define IDC_ED_SEG_ADD_TEXT     3037
 #define IDC_ED_SEG_ADD_SELECT   3038
 #define IDC_ED_SEG_ADD_MULTI    3039
+#define IDC_ED_SEG_HIDDEN       3040
 
 /* 规则编辑子对话框 */
 #define IDC_RL_TYPE             3101

@@ -23,7 +23,7 @@
 
 #define QP_APP_NAME    L"QuickPhrase"
 #define QP_APP_TITLE   L"口径生成器"
-#define QP_APP_VERSION L"1.2.0"
+#define QP_APP_VERSION L"1.3.0"
 
 /* ---------------------- 全局状态（定义在 main.c） ------------------ */
 extern HINSTANCE g_hInst;
