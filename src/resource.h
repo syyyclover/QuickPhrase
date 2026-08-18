@@ -111,6 +111,13 @@
 #define IDC_ED_SEG_ADD_MULTI    3039
 #define IDC_ED_SEG_HIDDEN       3040
 #define IDC_ED_SEG_MULTILINE    3041   /* 文本输入：多行大文本框 */
+#define IDC_ED_SEG_ADD_TIME     3042   /* 「+时间」按钮          */
+#define IDC_ED_SEG_FORMAT       3043   /* 时间格式（可下拉可手敲）*/
+#define IDC_ED_SEG_FMT_SAMPLE   3044   /* 格式的实时示例（灰字）  */
+#define IDC_ED_SEG_REF          3045   /* 引用来源变量            */
+#define IDC_ED_SEG_REF_MODE     3046   /* 取法：整体/分隔符/按字  */
+#define IDC_ED_SEG_REF_A        3047   /* 取法参数一：分隔符 / 起始 */
+#define IDC_ED_SEG_REF_B        3048   /* 取法参数二：第N段 / 取几个 */
 
 /* 规则编辑子对话框 */
 #define IDC_RL_TYPE             3101

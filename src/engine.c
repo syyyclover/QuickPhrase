@@ -171,6 +171,132 @@ void qp_now_iso(wchar_t *out, size_t cap)
     swprintf(out, cap, L"%hs", buf);
 }
 
+/* ------------------------------------------------------------------ */
+/* 时间格式化                                                          */
+/*                                                                    */
+/* 自己解析记号而不是转手 strftime：strftime 的 %-记号对不写代码的人不                */
+/* 友好（%Y-%m-%d 谁记得住），而 yyyy-MM-dd 一看就懂，还能直接写                 */
+/* 「yyyy年M月d日」这种中间夹汉字的格式。                                       */
+/* ------------------------------------------------------------------ */
+static const wchar_t *const QP_TIME_FORMATS[] = {
+    L"yyyy-MM-dd HH:mm:ss",
+    L"yyyy-MM-dd HH:mm",
+    L"yyyy-MM-dd",
+    L"yyyy年M月d日",
+    L"yyyy年M月d日 HH:mm",
+    L"M月d日 HH:mm",
+    L"HH:mm:ss",
+    L"HH:mm",
+    L"yyyy/MM/dd HH:mm",
+    L"yyyyMMddHHmmss"
+};
+
+int qp_time_format_count(void)
+{
+    return (int)(sizeof(QP_TIME_FORMATS) / sizeof(QP_TIME_FORMATS[0]));
+}
+
+const wchar_t *qp_time_format_at(int index)
+{
+    if (index < 0 || index >= qp_time_format_count()) return L"";
+    return QP_TIME_FORMATS[index];
+}
+
+/* 数出 fmt 从 p 起连续多少个相同字符（yyyy → 4） */
+static int run_len(const wchar_t *p)
+{
+    int n = 1;
+    while (p[n] == p[0]) ++n;
+    return n;
+}
+
+static void put_num(wchar_t *out, size_t cap, size_t *used, int v, int width)
+{
+    wchar_t buf[16];
+    size_t len;
+    swprintf(buf, 16, width >= 2 ? L"%02d" : L"%d", v);
+    len = wcslen(buf);
+    if (*used + len + 1 > cap) return;
+    wmemcpy(out + *used, buf, len);
+    *used += len;
+    out[*used] = L'\0';
+}
+
+static void put_text(wchar_t *out, size_t cap, size_t *used, const wchar_t *s)
+{
+    size_t len = wcslen(s);
+    if (*used + len + 1 > cap) return;
+    wmemcpy(out + *used, s, len);
+    *used += len;
+    out[*used] = L'\0';
+}
+
+void qp_format_time(const struct tm *tmv, const wchar_t *fmt,
+                    wchar_t *out, size_t cap)
+{
+    static const wchar_t *const week[] = {
+        L"周日", L"周一", L"周二", L"周三", L"周四", L"周五", L"周六"
+    };
+    const wchar_t *p;
+    size_t used = 0;
+
+    if (!out || cap == 0) return;
+    out[0] = L'\0';
+    if (!tmv) return;
+    if (!fmt || !*fmt) fmt = QP_TIME_FORMATS[0];
+
+    for (p = fmt; *p; ) {
+        int n = run_len(p);
+        switch (*p) {
+        case L'y':
+            /* yy = 两位年，其余一律四位 */
+            if (n == 2) put_num(out, cap, &used, (tmv->tm_year + 1900) % 100, 2);
+            else        put_num(out, cap, &used, tmv->tm_year + 1900, 4);
+            break;
+        case L'M': put_num(out, cap, &used, tmv->tm_mon + 1, n); break;
+        case L'd':
+            /* ddd = 中文星期；d / dd = 日 */
+            if (n >= 3) {
+                int w = tmv->tm_wday;
+                put_text(out, cap, &used, week[(w >= 0 && w <= 6) ? w : 0]);
+            } else {
+                put_num(out, cap, &used, tmv->tm_mday, n);
+            }
+            break;
+        case L'H': put_num(out, cap, &used, tmv->tm_hour, n); break;
+        case L'm': put_num(out, cap, &used, tmv->tm_min, n); break;
+        case L's': put_num(out, cap, &used, tmv->tm_sec, n); break;
+        default: {
+            /* 非记号字符原样搬过去（一次搬完这一串相同字符） */
+            int k;
+            for (k = 0; k < n; ++k) {
+                if (used + 2 > cap) break;
+                out[used++] = *p;
+                out[used] = L'\0';
+            }
+            break;
+        }
+        }
+        p += n;
+    }
+}
+
+void qp_format_time_now(const wchar_t *fmt, wchar_t *out, size_t cap)
+{
+    time_t now = time(NULL);
+    struct tm tmv;
+#if defined(_WIN32)
+    localtime_s(&tmv, &now);
+#else
+    {
+        struct tm *p = localtime(&now);
+        if (p) tmv = *p;
+        else memset(&tmv, 0, sizeof(tmv));
+    }
+#endif
+    qp_format_time(&tmv, fmt, out, cap);
+}
+
 /* ================================================================== */
 /* 片段                                                                */
 /* ================================================================== */
@@ -182,6 +308,12 @@ Segment *seg_create(SegmentType type)
     qp_new_id(s->id, QP_ID_MAX, L"seg");
     s->type = type;
     qp_strlcpy(s->separator, L"、", QP_SEP_MAX);
+    /* 引用参数的默认值：第 1 段 / 第 1 个字起，取到末尾 */
+    s->ref_mode = REF_WHOLE;
+    s->ref_index = 1;
+    s->ref_start = 1;
+    s->ref_len = 0;
+    if (type == SEG_DATETIME) qp_strlcpy(s->time_format, qp_time_format_at(0), QP_FORMAT_MAX);
     return s;
 }
 
@@ -272,6 +404,13 @@ Segment *seg_clone(const Segment *s)
     qp_strlcpy(c->default_value, s->default_value, QP_VALUE_MAX);
     c->hidden = s->hidden;
     c->multiline = s->multiline;
+    qp_strlcpy(c->time_format, s->time_format, QP_FORMAT_MAX);
+    qp_strlcpy(c->ref_segment_id, s->ref_segment_id, QP_ID_MAX);
+    c->ref_mode = s->ref_mode;
+    qp_strlcpy(c->ref_delimiter, s->ref_delimiter, QP_SEP_MAX);
+    c->ref_index = s->ref_index;
+    c->ref_start = s->ref_start;
+    c->ref_len = s->ref_len;
     if (s->option_count > 0) {
         c->options = (wchar_t **)calloc((size_t)s->option_count, sizeof(wchar_t *));
         if (c->options) {
@@ -291,6 +430,86 @@ const wchar_t *seg_display_name(const Segment *s)
     if (!s) return L"";
     if (s->type == SEG_STATIC) return s->content;
     return s->label[0] ? s->label : L"(未命名变量)";
+}
+
+/* ------------------------------------------------------------------ */
+/* 引用                                                                */
+/* ------------------------------------------------------------------ */
+
+void seg_ref_extract(const Segment *s, const wchar_t *src,
+                     wchar_t *out, size_t cap)
+{
+    if (!out || cap == 0) return;
+    out[0] = L'\0';
+    if (!s || !src) return;
+
+    if (s->ref_mode == REF_SPLIT) {
+        /* 与解析规则的 split 用同一个函数，两处行为天生一致 */
+        if (!qp_split_take(src, s->ref_delimiter, s->ref_index, out, cap))
+            out[0] = L'\0';
+        return;
+    }
+    if (s->ref_mode == REF_SUBSTR) {
+        size_t len = wcslen(src);
+        size_t from = (s->ref_start > 1) ? (size_t)(s->ref_start - 1) : 0;
+        size_t take;
+        if (from >= len) return;                      /* 起点越界 → 空 */
+        take = (s->ref_len > 0) ? (size_t)s->ref_len : (len - from);
+        if (take > len - from) take = len - from;     /* 取多了就取到末尾 */
+        if (take > cap - 1) take = cap - 1;
+        wmemcpy(out, src + from, take);
+        out[take] = L'\0';
+        return;
+    }
+    qp_strlcpy(out, src, cap);                        /* REF_WHOLE */
+}
+
+void seg_ref_summary(const Segment *s, const Template *t,
+                     wchar_t *out, size_t cap)
+{
+    const Segment *src;
+    const wchar_t *name;
+    if (!out || cap == 0) return;
+    out[0] = L'\0';
+    if (!s || !s->ref_segment_id[0]) return;
+    src = tmpl_find_segment(t, s->ref_segment_id);
+    name = src ? seg_display_name(src) : L"(已删除的变量)";
+    switch (s->ref_mode) {
+    case REF_SPLIT:
+        swprintf(out, cap, L"引用[%ls] 按“%ls”取第 %d 段",
+                 name, s->ref_delimiter, s->ref_index);
+        break;
+    case REF_SUBSTR:
+        if (s->ref_len > 0)
+            swprintf(out, cap, L"引用[%ls] 第 %d 个字起取 %d 个",
+                     name, s->ref_start > 0 ? s->ref_start : 1, s->ref_len);
+        else
+            swprintf(out, cap, L"引用[%ls] 第 %d 个字起到末尾",
+                     name, s->ref_start > 0 ? s->ref_start : 1);
+        break;
+    default:
+        swprintf(out, cap, L"引用[%ls]", name);
+        break;
+    }
+}
+
+int tmpl_ref_would_cycle(const Template *t, const Segment *target,
+                         const wchar_t *source_id)
+{
+    const Segment *p;
+    int depth;
+    if (!target || !source_id || !source_id[0]) return 0;
+    /* 自己引用自己 */
+    if (wcscmp(source_id, target->id) == 0) return 1;
+    /* 顺着来源自己的引用链往上走，看会不会绕回 target */
+    p = tmpl_find_segment(t, source_id);
+    for (depth = 0; p && depth < QP_REF_MAX_DEPTH; ++depth) {
+        if (!p->ref_segment_id[0]) return 0;
+        if (wcscmp(p->ref_segment_id, target->id) == 0) return 1;
+        p = tmpl_find_segment(t, p->ref_segment_id);
+    }
+    /* 走满深度还没走完：链上本来就有环，别再往里加 */
+    return p != NULL;
 }
 
 /* ================================================================== */
@@ -982,6 +1201,15 @@ void eval_reset(EvalContext *ctx)
         f->user_value[0] = L'\0';
         f->sticky[0] = L'\0';
         qp_strlcpy(f->value, seg_default_of(f->seg), QP_VALUE_MAX);
+        /* 时间变量：开这份填写（新建 / 切模板 / 重置）时就按当下拍一张快照，
+           写进「手动填写」那一层。放在这里而不是每次求值都取 time()，是为了
+           让这个值稳定——否则在别处敲一个字，眼前的时间就自己往前跳一秒，
+           而人根本没动它。要刷新成此刻，界面上有「现在」按钮。 */
+        if (f->seg && f->seg->type == SEG_DATETIME) {
+            qp_format_time_now(f->seg->time_format, f->user_value, QP_VALUE_MAX);
+            f->user_touched = 1;
+            qp_strlcpy(f->value, f->user_value, QP_VALUE_MAX);
+        }
     }
     eval_run(ctx);
 }
@@ -1017,6 +1245,18 @@ void eval_set_user_value(EvalContext *ctx, int idx, const wchar_t *v)
     f->user_touched = 1;
     /* 注意：手动输入不会压过变量匹配。该字段一旦被规则推导出值，
        eval_run 里就以规则值为准（详见 eval_run 第 3 步）。 */
+}
+
+/* 恢复兜底值。并行填写切回来时用：一个「只靠匹配填、此刻已不再命中」的变量，
+   靠的就是这个值才不会在输出里空一段，所以它跟手填值一样得随快照一起回来。 */
+void eval_set_sticky(EvalContext *ctx, int idx, const wchar_t *v)
+{
+    EvalField *f;
+    if (!ctx || idx < 0 || idx >= ctx->count) return;
+    f = &ctx->fields[idx];
+    if (!v || !*v) { f->sticky[0] = L'\0'; f->has_sticky = 0; return; }
+    qp_strlcpy(f->sticky, v, QP_VALUE_MAX);
+    f->has_sticky = 1;
 }
 
 /* 解析规则是否命中；命中时 extracted 返回提取到的内容 */
@@ -1108,16 +1348,38 @@ void eval_run(EvalContext *ctx)
     wchar_t (*work)[QP_VALUE_MAX];
     wchar_t (*derived)[QP_VALUE_MAX];
     int *derived_set;
-    int i, pass;
+    int *parse_set;      /* 本轮该目标已被解析规则占下 */
+    int *ref_cycle;      /* 该字段的引用链上有环 → 整条不生效 */
+    int i, pass, rp;
 
     if (!ctx || ctx->count <= 0) return;
 
     work = (wchar_t (*)[QP_VALUE_MAX])calloc((size_t)ctx->count, sizeof(*work));
     derived = (wchar_t (*)[QP_VALUE_MAX])calloc((size_t)ctx->count, sizeof(*derived));
     derived_set = (int *)calloc((size_t)ctx->count, sizeof(int));
-    if (!work || !derived || !derived_set) {
-        free(work); free(derived); free(derived_set);
+    parse_set = (int *)calloc((size_t)ctx->count, sizeof(int));
+    ref_cycle = (int *)calloc((size_t)ctx->count, sizeof(int));
+    if (!work || !derived || !derived_set || !parse_set || !ref_cycle) {
+        free(work); free(derived); free(derived_set); free(parse_set); free(ref_cycle);
         return;
+    }
+    ctx->unstable = 0;
+
+    /* 引用成环检测只跟模板结构有关，与填了什么无关，所以在迭代外面做一次。
+       A→B→A 这种环没有「正确答案」，整条链一律当没配引用，退回手填/默认值，
+       与「条件项指向不存在的变量一律不成立」同一个态度：宁可不生效，不能乱生效。 */
+    for (i = 0; i < ctx->count; ++i) {
+        const Segment *s = ctx->fields[i].seg;
+        int at, depth;
+        if (!s || !s->ref_segment_id[0]) continue;
+        at = eval_index_of_id(ctx, s->ref_segment_id);
+        for (depth = 0; at >= 0 && depth < QP_REF_MAX_DEPTH; ++depth) {
+            const Segment *p = ctx->fields[at].seg;
+            if (at == i) { ref_cycle[i] = 1; break; }
+            if (!p || !p->ref_segment_id[0]) break;
+            at = eval_index_of_id(ctx, p->ref_segment_id);
+        }
+        if (depth >= QP_REF_MAX_DEPTH) ref_cycle[i] = 1;   /* 走不完：链上有环 */
     }
 
     /* 初值：用户输入优先于默认值 */
@@ -1133,7 +1395,11 @@ void eval_run(EvalContext *ctx)
     for (pass = 0; pass < QP_EVAL_MAX_PASS; ++pass) {
         int changed = 0;
 
-        for (i = 0; i < ctx->count; ++i) { derived_set[i] = 0; derived[i][0] = L'\0'; }
+        for (i = 0; i < ctx->count; ++i) {
+            derived_set[i] = 0;
+            parse_set[i] = 0;
+            derived[i][0] = L'\0';
+        }
 
         /* 1) 解析规则：只有 text 变量参与，按顺序，每个目标取第一条命中的 */
         for (i = 0; i < ctx->count; ++i) {
@@ -1150,10 +1416,39 @@ void eval_run(EvalContext *ctx)
                            r->fill_value[0] ? r->fill_value : extracted,
                            QP_VALUE_MAX);
                 derived_set[target] = 1;
+                parse_set[target] = 1;
             }
         }
 
-        /* 2) 条件规则：挂在片段自身上，按顺序，命中即停止 */
+        /* 2) 引用：本片段的值直接取自另一个变量（整体或其中一部分）。
+              解析规则已经推导出的目标不再被引用改写（解析规则更具体，优先），
+              而下面第 3 步的条件规则仍可覆盖引用结果 —— 三者叠加时只有一个说法。
+
+              内部再迭代一次是为了链式引用（A→B→C→D）：取源值时优先读本轮已经
+              推导出的 derived，一轮之内就能传到链尾，不用靠外层那 8 轮预算去
+              一级一级挪（链长超过 7 就会挪不完）。 */
+        for (rp = 0; rp < QP_REF_MAX_DEPTH; ++rp) {
+            int ref_changed = 0;
+            for (i = 0; i < ctx->count; ++i) {
+                const Segment *s = ctx->fields[i].seg;
+                wchar_t picked[QP_VALUE_MAX];
+                int src;
+                if (!s || s->type == SEG_STATIC || !s->ref_segment_id[0]) continue;
+                if (parse_set[i]) continue;              /* 解析规则占了这个目标 */
+                src = eval_index_of_id(ctx, s->ref_segment_id);
+                if (src < 0 || src == i) continue;       /* 悬空 / 自引用 → 视为没配 */
+                if (ref_cycle[i]) continue;              /* 成环的那条链整条不生效 */
+                seg_ref_extract(s, derived_set[src] ? derived[src] : work[src],
+                                picked, QP_VALUE_MAX);
+                if (derived_set[i] && wcscmp(derived[i], picked) == 0) continue;
+                qp_strlcpy(derived[i], picked, QP_VALUE_MAX);
+                derived_set[i] = 1;
+                ref_changed = 1;
+            }
+            if (!ref_changed) break;
+        }
+
+        /* 3) 条件规则：挂在片段自身上，按顺序，命中即停止 */
         for (i = 0; i < ctx->count; ++i) {
             const Segment *s = ctx->fields[i].seg;
             const ConditionRule *r;
@@ -1166,9 +1461,9 @@ void eval_run(EvalContext *ctx)
             }
         }
 
-        /* 3) 应用：规则值 > 用户输入 > 默认值。
-           变量匹配（解析规则 / 条件规则）推导出的值一律压过手动输入与手动选择，
-           这样「既能手填又有匹配」的变量不会因为手滑而与口径脱节。 */
+        /* 4) 应用：推导值 > 用户输入 > 默认值。
+           变量匹配（条件规则 / 解析规则 / 引用）推导出的值一律压过手动输入与
+           手动选择，这样「既能手填又有匹配」的变量不会因为手滑而与口径脱节。 */
         for (i = 0; i < ctx->count; ++i) {
             EvalField *f = &ctx->fields[i];
             wchar_t next[QP_VALUE_MAX];
@@ -1186,6 +1481,9 @@ void eval_run(EvalContext *ctx)
         }
 
         if (!changed) break;
+        /* 跑满还在变 = 规则互相覆盖，收不敛。以最后一轮为准，同时立个旗子，
+           界面提示一句，别让人对着一个来回跳的预览猜自己哪里配错了。 */
+        if (pass == QP_EVAL_MAX_PASS - 1) ctx->unstable = 1;
     }
 
     /* 提交 */
@@ -1202,6 +1500,8 @@ void eval_run(EvalContext *ctx)
     free(work);
     free(derived);
     free(derived_set);
+    free(parse_set);
+    free(ref_cycle);
 }
 
 size_t eval_render(const EvalContext *ctx, wchar_t *out, size_t cap)
@@ -1249,6 +1549,7 @@ const wchar_t *seg_type_name(SegmentType t)
     case SEG_TEXT:         return L"文本";
     case SEG_SELECT:       return L"单选";
     case SEG_MULTI_SELECT: return L"多选";
+    case SEG_DATETIME:     return L"时间";
     default:               return L"?";
     }
 }
@@ -1293,8 +1594,12 @@ int cond_op_needs_value(CondOperator op)
 
 static const wchar_t *seg_name_by_id(const Template *t, const wchar_t *id)
 {
-    const Segment *s = tmpl_find_segment(t, id);
-    if (!s) return L"(未指定)";
+    const Segment *s;
+    /* 「没选」和「选的那个已经被删了」是两回事：后者的规则/引用一律不生效，
+       摘要里必须说清楚，否则界面上看着配好了、实际永远不命中。 */
+    if (!id || !id[0]) return L"(未指定)";
+    s = tmpl_find_segment(t, id);
+    if (!s) return L"(已删除的变量)";
     return seg_display_name(s);
 }
 

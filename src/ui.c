@@ -43,9 +43,10 @@ typedef struct {
     int   field_index;             /* 在 g_ctx->fields 中的下标 */
     HWND  hLabel;
     HWND  hCtl;                    /* Edit / ComboBox / 只读 Edit */
-    HWND  hBtn;                    /* multi-select 的下拉按钮     */
+    HWND  hBtn;                    /* multi-select 的 ▼ / datetime 的「现在」 */
     int   y;                       /* 逻辑 y（未减去滚动量）      */
     int   h;                       /* 控件高度（多行文本框更高）  */
+    int   btnW;                    /* hBtn 宽度；0 = 用默认 DPIX(26) */
     int   extraIndex;              /* select：为规则值临时追加的项，-1 = 无 */
     int   readonly;                /* text：当前是否因被规则接管而只读 */
 } FieldCtl;
@@ -54,6 +55,8 @@ static FieldCtl *g_fields;
 static int       g_fieldCount;
 static int       g_hostScroll;     /* 字段区滚动偏移 */
 static int       g_hostContentH;
+static int       g_unstableWarned; /* 提示行里现在挂着「规则相互覆盖」那句 */
+static int       g_syncFields;     /* >0：正在把引擎值写进控件，别回读 */
 
 /* 多选下拉弹层（自绘 + 鼠标捕获，不改变焦点与激活，详见下方章节注释） */
 static HWND  g_popup;
@@ -77,6 +80,10 @@ static int        g_dragging;
 static int g_splitDrag;
 static int g_splitGrabDx;          /* 按下点相对分隔条左沿的偏移 */
 static int g_splitLastX = -1;      /* 上次绘制的分隔条位置       */
+/* 横分隔条（字段区 ↔ 口径预览）：与竖条同一套做法，见下方 WM_LBUTTONDOWN */
+static int g_hsplitDrag;
+static int g_hsplitGrabDy;         /* 按下点相对横条上沿的偏移   */
+static int g_hsplitLastY = -1;     /* 上次绘制的横条位置         */
 
 typedef struct { int kind; wchar_t id[QP_ID_MAX]; } NodeRef;  /* kind: 0=分组 1=模板 */
 
@@ -1112,7 +1119,6 @@ static void host_reposition(void)
     RECT rc;
     HDWP dwp;
     int i, labelW = DPIX(96), pad = DPIX(12);
-    int btnW = DPIX(26);
     if (!g_hHost || g_fieldCount <= 0 || !g_fields) return;
     GetClientRect(g_hHost, &rc);
     dwp = BeginDeferWindowPos(g_fieldCount * 3);
@@ -1122,6 +1128,7 @@ static void host_reposition(void)
         int ctlH = f->h > 0 ? f->h : QP_ROW_CTL_H;
         int cx = pad + labelW + DPIX(8);
         int cw = (rc.right - rc.left) - cx - pad;
+        int btnW = f->btnW > 0 ? f->btnW : DPIX(26);
         if (cw < DPIX(80)) cw = DPIX(80);
         /* 多行框：标签跟第一行文字对齐，不跟着框子居中 */
         dwp = qp_defer(dwp, f->hLabel, pad, y + DPIX(4), labelW, DPIX(18));
@@ -1278,6 +1285,9 @@ typedef struct {
     unsigned  used;                /* 最近一次激活的序号             */
     wchar_t (*ids)[QP_ID_MAX];     /* 变量 id 列表（激活时抓取）     */
     wchar_t **vals;                /* 与 ids 一一对应；NULL = 没手填过 */
+    wchar_t **sticks;              /* 规则曾推导出的兜底值（sticky）；
+                                      不存的话「只靠匹配填、此刻已不
+                                      再命中」的变量切回来会少一段   */
     int       count;
 } Session;
 
@@ -1311,6 +1321,11 @@ static void sess_drop_values(Session *s)
         for (i = 0; i < s->count; ++i) free(s->vals[i]);
         free(s->vals);
         s->vals = NULL;
+    }
+    if (s->sticks) {
+        for (i = 0; i < s->count; ++i) free(s->sticks[i]);
+        free(s->sticks);
+        s->sticks = NULL;
     }
     free(s->ids);
     s->ids = NULL;
@@ -1376,7 +1391,9 @@ static int sess_has_input(const Session *s)
 /* ---------------------- 取值的保存与恢复 -------------------------- */
 
 /* 把上下文里的手填值抄进会话。只读 EvalContext，不碰 Segment，因此哪怕
-   整份数据已经被释放（切数据目录）也能安全调用。 */
+   整份数据已经被释放（切数据目录）也能安全调用。
+   sticky 一并抄走：它是「只靠变量匹配填、此刻规则已不再命中」时的兜底值，
+   不带上的话切走再切回来输出就会少一段（承诺是「内容都还在」）。 */
 static void sess_save(Session *s)
 {
     int i;
@@ -1385,15 +1402,20 @@ static void sess_save(Session *s)
         const EvalField *f = &g_ctx->fields[i];
         free(s->vals[i]);
         s->vals[i] = f->user_touched ? qp_wcsdup(f->user_value) : NULL;
+        if (s->sticks) {
+            free(s->sticks[i]);
+            s->sticks[i] = f->has_sticky ? qp_wcsdup(f->sticky) : NULL;
+        }
     }
 }
 
-/* 激活一份：建上下文 → 把上次的手填值按变量 id 喂回去 → 重抓 id 列表。
-   只恢复「手填值」，规则推导的部分交给 eval_run 重算，结果与切走前一致。 */
+/* 激活一份：建上下文 → 把上次的手填值与 sticky 按变量 id 喂回去 → 重抓
+   id 列表。规则推导的部分交给 eval_run 重算，结果与切走前一致。 */
 static void sess_activate(Session *s, const Template *t)
 {
     wchar_t (*ids)[QP_ID_MAX] = NULL;
     wchar_t **vals = NULL;
+    wchar_t **sticks = NULL;
     int i, n;
 
     if (!s || !t) return;
@@ -1403,10 +1425,10 @@ static void sess_activate(Session *s, const Template *t)
     if (!g_ctx) return;
 
     for (i = 0; i < s->count; ++i) {
-        int idx;
-        if (!s->vals || !s->vals[i]) continue;
-        idx = eval_index_of_id(g_ctx, s->ids[i]);
-        if (idx >= 0) eval_set_user_value(g_ctx, idx, s->vals[i]);
+        int idx = eval_index_of_id(g_ctx, s->ids[i]);
+        if (idx < 0) continue;
+        if (s->vals && s->vals[i]) eval_set_user_value(g_ctx, idx, s->vals[i]);
+        if (s->sticks && s->sticks[i]) eval_set_sticky(g_ctx, idx, s->sticks[i]);
     }
     eval_run(g_ctx);
 
@@ -1415,7 +1437,11 @@ static void sess_activate(Session *s, const Template *t)
     if (n > 0) {
         ids  = (wchar_t (*)[QP_ID_MAX])calloc((size_t)n, sizeof(*ids));
         vals = (wchar_t **)calloc((size_t)n, sizeof(*vals));
-        if (!ids || !vals) { free(ids); free(vals); return; }   /* 保住旧快照 */
+        sticks = (wchar_t **)calloc((size_t)n, sizeof(*sticks));
+        if (!ids || !vals || !sticks) {                 /* 保住旧快照 */
+            free(ids); free(vals); free(sticks);
+            return;
+        }
     }
     sess_drop_values(s);
     for (i = 0; i < n; ++i)
@@ -1423,6 +1449,7 @@ static void sess_activate(Session *s, const Template *t)
                    QP_ID_MAX);
     s->ids = ids;
     s->vals = vals;
+    s->sticks = sticks;
     s->count = n;
 }
 
@@ -1863,16 +1890,20 @@ static void sess_duplicate(int vis)
     if (src->count > 0 && src->ids) {
         dst->ids  = (wchar_t (*)[QP_ID_MAX])calloc((size_t)src->count, sizeof(*dst->ids));
         dst->vals = (wchar_t **)calloc((size_t)src->count, sizeof(*dst->vals));
-        if (dst->ids && dst->vals) {
+        dst->sticks = (wchar_t **)calloc((size_t)src->count, sizeof(*dst->sticks));
+        if (dst->ids && dst->vals && dst->sticks) {
             dst->count = src->count;
             for (i = 0; i < src->count; ++i) {
                 qp_strlcpy(dst->ids[i], src->ids[i], QP_ID_MAX);
                 dst->vals[i] = (src->vals && src->vals[i])
                                  ? qp_wcsdup(src->vals[i]) : NULL;
+                dst->sticks[i] = (src->sticks && src->sticks[i])
+                                 ? qp_wcsdup(src->sticks[i]) : NULL;
             }
         } else {
             free(dst->ids);  dst->ids = NULL;
             free(dst->vals); dst->vals = NULL;
+            free(dst->sticks); dst->sticks = NULL;
         }
     }
     sess_rebind(dst);
@@ -2147,6 +2178,15 @@ static void ui_build_fields(void)
                                 0, 0, 10, DPIX(300), g_hHost, ctlId);
             for (k = 0; k < seg->option_count; ++k)
                 SendMessageW(f->hCtl, CB_ADDSTRING, 0, (LPARAM)seg->options[k]);
+        } else if (seg->type == SEG_DATETIME) {
+            /* 时间：单行框（内容仍可手改）+「现在」刷新成此刻。
+               按钮复用多选 ▼ 的那个位置（ctlId + 1），不用动 STRIDE。 */
+            f->hCtl = qp_create(L"Edit", g_ctx->fields[i].value,
+                                ES_AUTOHSCROLL | WS_TABSTOP, WS_EX_CLIENTEDGE,
+                                0, 0, 10, 10, g_hHost, ctlId);
+            f->hBtn = qp_create(L"Button", L"现在", BS_PUSHBUTTON | WS_TABSTOP, 0,
+                                0, 0, 10, 10, g_hHost, ctlId + 1);
+            f->btnW = DPIX(46);
         } else { /* SEG_MULTI_SELECT */
             f->hCtl = qp_create(L"Edit", g_ctx->fields[i].value,
                                 ES_AUTOHSCROLL | ES_READONLY | WS_TABSTOP,
@@ -2170,17 +2210,27 @@ static void ui_build_fields(void)
                  RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
 }
 
-/* 把求值结果同步到控件（跳过正在输入的控件，避免光标跳动） */
+/* 把求值结果同步到控件（跳过正在输入的控件，避免光标跳动）。
+   同时统一处理「被规则/引用接管 → 该控件只读」：文本与时间用
+   EM_SETREADONLY（文字颜色不变，照常刷新），单选/多选没有只读态，
+   只能整体禁用。三者语义一致：界面上看到的永远是最终生效的值。 */
 static void ui_sync_controls(void)
 {
     HWND focus = GetFocus();
     int i;
     if (!g_ctx) return;
+    /* 下面往 Edit 里写字会引出 EN_CHANGE。那不是人在敲键盘，而是我们自己把引擎
+       的值写回去，绝不能再当成「手动填写」回读一遍：否则规则填进去的值会顺手
+       变成手填值，等规则下一轮不再命中时，它就赖在框里不肯让位给默认值。
+       （单选走 CB_SETCURSEL，本来就不会发 CBN_SELCHANGE，两者由此一致。） */
+    ++g_syncFields;
     for (i = 0; i < g_fieldCount; ++i) {
         FieldCtl *f = &g_fields[i];
         const EvalField *ef = &g_ctx->fields[f->field_index];
         const Segment *seg = ef->seg;
+        int ro;
         if (!seg) continue;
+        ro = ef->rule_driven ? 1 : 0;
         if (seg->type == SEG_SELECT) {
             /* 控件必须严格跟随引擎里的值：值为空时也要清掉选中态，
                否则界面上还留着上一次匹配到的文字，看着「已填」，
@@ -2209,14 +2259,12 @@ static void ui_sync_controls(void)
             if (idx < 0) idx = -1;                    /* CB_ERR / 空值 → 不选中 */
             if ((int)SendMessageW(f->hCtl, CB_GETCURSEL, 0, 0) != idx)
                 SendMessageW(f->hCtl, CB_SETCURSEL, (WPARAM)idx, 0);
-        } else if (seg->type == SEG_TEXT) {
+        } else if (seg->type == SEG_TEXT || seg->type == SEG_DATETIME) {
             /* 被变量匹配接管的文本框转为只读：手动输入已经不作数了（规则值
                优先），再让人敲字只会造成「框里是我打的、预览是规则算的」错觉。
                只读时也照常刷新，框里始终就是最终生效的值。 */
-            int ro = ef->rule_driven ? 1 : 0;
             if (f->readonly != ro) {
                 SendMessageW(f->hCtl, EM_SETREADONLY, (WPARAM)ro, 0);
-                f->readonly = ro;
                 InvalidateRect(f->hCtl, NULL, TRUE);
             }
             if (ro || f->hCtl != focus)
@@ -2226,7 +2274,28 @@ static void ui_sync_controls(void)
                否则勾选了也看不到文字变化。 */
             qp_set_text_if_diff(f->hCtl, ef->value);
         }
+        /* 单选 / 多选没有「只读」态，被接管时只能整体禁用，否则点得动、
+           下一次刷新又被规则值顶回去，白点一下（v2.1 修） */
+        if (f->readonly != ro &&
+            (seg->type == SEG_SELECT || seg->type == SEG_MULTI_SELECT)) {
+            if (ro) {
+                if (g_popupField == f->field_index) popup_close();
+                if (focus == f->hCtl || focus == f->hBtn) {
+                    SetFocus(g_hwndMain);
+                    focus = GetFocus();
+                }
+            }
+            EnableWindow(f->hCtl, ro ? FALSE : TRUE);
+            if (f->hBtn) EnableWindow(f->hBtn, ro ? FALSE : TRUE);
+        }
+        /* 时间的「现在」按钮同理：值由规则说话时刷新它没有意义 */
+        if (f->readonly != ro && seg->type == SEG_DATETIME && f->hBtn) {
+            if (ro && focus == f->hBtn) { SetFocus(g_hwndMain); focus = GetFocus(); }
+            EnableWindow(f->hBtn, ro ? FALSE : TRUE);
+        }
+        f->readonly = ro;
     }
+    --g_syncFields;
 }
 
 void ui_refresh_current(void)
@@ -2240,6 +2309,15 @@ void ui_refresh_current(void)
     ui_sync_controls();
     eval_render(g_ctx, out, QP_OUTPUT_MAX);
     if (g_hPreview) qp_set_text_if_diff(g_hPreview, out);
+    /* 规则互相覆盖、迭代跑满仍没收敛时说一句：否则界面只是安静地拿着中间态，
+       人看到的结果说不清是哪一轮的（v2.1 修） */
+    if (g_ctx->unstable) {
+        qp_set_text_if_diff(g_hHint, L"规则相互覆盖没能稳定，已按最后一轮结果生成");
+        g_unstableWarned = 1;
+    } else if (g_unstableWarned) {
+        g_unstableWarned = 0;
+        qp_set_text_if_diff(g_hHint, L"填写后自动套用规则，Ctrl+Enter 可直接复制");
+    }
 }
 
 static void ui_select_template(Template *t)
@@ -2817,7 +2895,9 @@ static int ui_tree_width_for(int clientW)
     return w;
 }
 
-#define QP_SPLIT_HIT DPIX(10)      /* 分隔条命中宽度 */
+#define QP_SPLIT_HIT DPIX(10)      /* 竖分隔条命中宽度 */
+#define QP_HSPLIT_HIT DPIX(8)      /* 横分隔条命中高度（顶掉原来的 6px 间距） */
+#define QP_TREE_W_DEF 230          /* 双击竖条恢复到这个宽度 */
 
 static int splitter_x(void)
 {
@@ -2827,13 +2907,66 @@ static int splitter_x(void)
     return DPIX(8) + ui_tree_width_for(rc.right - rc.left);
 }
 
+/* 字段区顶端：与 ui_layout 同源，横分隔条的可拖范围要靠它反推 */
+static int ui_host_top(void)
+{
+    int tabsH = (g_curTmpl && g_hTabs) ? QP_TABS_H : 0;
+    return DPIX(8) + DPIX(22) + DPIX(6) + (tabsH ? tabsH + DPIX(4) : 0);
+}
+
+/* 口径预览区的合法高度区间：上限按「字段区至少留 DPIX(40)」反推 */
+static void ui_preview_bounds(int H, int *lo, int *hi)
+{
+    int minH = DPIX(64);
+    int maxH = (H - DPIX(8) - DPIX(28)) - DPIX(6) - DPIX(18) - QP_HSPLIT_HIT
+               - ui_host_top() - DPIX(40);
+    if (maxH < minH) maxH = minH;
+    *lo = minH;
+    *hi = maxH;
+}
+
+/* 预览区高度：0 = 自动（沿用 H/4 的老口径），否则用记住的像素值。
+   与 ui_tree_width_for 同一纪律 —— 只读夹取，绝不在布局里回写设置。 */
+static int ui_preview_height_for(int H)
+{
+    int lo, hi, h = g_settings.preview_height;
+    ui_preview_bounds(H, &lo, &hi);
+    if (h <= 0) {
+        h = H / 4;
+        if (h < DPIX(72)) h = DPIX(72);
+        if (h > DPIX(200)) h = DPIX(200);
+    }
+    if (h < lo) h = lo;
+    if (h > hi) h = hi;
+    return h;
+}
+
+/* 横分隔条上沿（右栏「字段区 ↔ 口径预览」之间那一条） */
+static int hsplitter_y(int H)
+{
+    return H - DPIX(8) - DPIX(28) - DPIX(6) - ui_preview_height_for(H)
+             - DPIX(18) - QP_HSPLIT_HIT;
+}
+
+/* 命中判定：只在右栏生效，与竖条的判定区不重叠 */
+static int hsplit_hit(int x, int y)
+{
+    RECT rc;
+    int top;
+    if (!g_hwndMain) return 0;
+    GetClientRect(g_hwndMain, &rc);
+    top = hsplitter_y(rc.bottom - rc.top);
+    return x > splitter_x() + QP_SPLIT_HIT && x < rc.right - DPIX(2) &&
+           y >= top && y < top + QP_HSPLIT_HIT;
+}
+
 static void ui_layout(HWND hwnd)
 {
     RECT rc;
     HDWP dwp;
     int m = DPIX(8), searchH = DPIX(24), gap = DPIX(6);
     int treeW, rx, rw, y, previewH, btnH = DPIX(28), btnW = DPIX(104);
-    int W, H, hostTop, hostH, sx, tabsH, tabsTop;
+    int W, H, hostTop, hostH, sx, sy, tabsH, tabsTop;
 
     if (!hwnd || !g_hTree) return;
     GetClientRect(hwnd, &rc);
@@ -2847,16 +2980,16 @@ static void ui_layout(HWND hwnd)
     rw = W - rx - m;
     if (rw < DPIX(200)) rw = DPIX(200);
 
-    previewH = H / 4;
-    if (previewH < DPIX(72)) previewH = DPIX(72);
-    if (previewH > DPIX(200)) previewH = DPIX(200);
+    previewH = ui_preview_height_for(H);
 
     y = H - m - btnH;
     /* 没选模板时标签条整条收掉，界面和以前一模一样 */
     tabsH = (g_curTmpl && g_hTabs) ? QP_TABS_H : 0;
     tabsTop = m + DPIX(22) + gap;
-    hostTop = tabsTop + (tabsH ? tabsH + DPIX(4) : 0);
-    hostH = (y - gap - previewH) - DPIX(18) - gap - hostTop;
+    hostTop = ui_host_top();
+    /* 字段区底下留出 QP_HSPLIT_HIT 而不是 gap：那一条正好当横分隔条的抓取带，
+       视觉高度只差 2px，却不用把命中区叠到字段区的子窗口上 */
+    hostH = (y - gap - previewH) - DPIX(18) - QP_HSPLIT_HIT - hostTop;
     if (hostH < DPIX(40)) hostH = DPIX(40);
 
     /* 一次性提交所有位置变化：逐个 MoveWindow 会让每个控件各自重绘一次，
@@ -2897,6 +3030,17 @@ static void ui_layout(HWND hwnd)
         InvalidateRect(hwnd, &strip, TRUE);
         g_splitLastX = sx;
     }
+    /* 横分隔条同理：只重刷它挪过的那一横条 */
+    sy = hsplitter_y(H);
+    if (g_hsplitLastY != sy) {
+        RECT strip;
+        strip.left   = rx;
+        strip.right  = rx + rw;
+        strip.top    = (g_hsplitLastY < 0 ? sy : (g_hsplitLastY < sy ? g_hsplitLastY : sy)) - DPIX(2);
+        strip.bottom = (g_hsplitLastY > sy ? g_hsplitLastY : sy) + QP_HSPLIT_HIT + DPIX(2);
+        InvalidateRect(hwnd, &strip, TRUE);
+        g_hsplitLastY = sy;
+    }
 }
 
 /* ================================================================== */
@@ -2927,8 +3071,19 @@ static void handle_field_command(WORD id, WORD code)
     if (!g_ctx || slot < 0 || slot >= g_fieldCount) return;
     f = &g_fields[slot];
 
-    if (which == 1) {                       /* ▼ 按钮 */
-        if (code == BN_CLICKED) popup_open(f->field_index, f->hCtl);
+    if (which == 1) {                       /* ▼ 按钮 / 时间的「现在」 */
+        const Segment *seg = g_ctx->fields[f->field_index].seg;
+        if (code != BN_CLICKED) return;
+        if (seg && seg->type == SEG_DATETIME) {
+            /* 重新拍一张此刻的快照。仍走「手动填写」那一层，因此后面不会被
+               默认值/上次匹配值顶掉，也不会自己悄悄跳动。 */
+            wchar_t now[QP_VALUE_MAX];
+            qp_format_time_now(seg->time_format, now, QP_VALUE_MAX);
+            eval_set_user_value(g_ctx, f->field_index, now);
+            ui_refresh_current();
+            return;
+        }
+        popup_open(f->field_index, f->hCtl);
         return;
     }
     if (which != 0) return;
@@ -2936,7 +3091,9 @@ static void handle_field_command(WORD id, WORD code)
     if (code == EN_CHANGE) {
         wchar_t buf[QP_VALUE_MAX];
         const Segment *seg = g_ctx->fields[f->field_index].seg;
-        if (!seg || seg->type != SEG_TEXT) return;   /* 只读框由弹窗驱动 */
+        if (g_syncFields) return;           /* 这一下是同步写进去的，不是人敲的 */
+        /* 多选的只读框由弹层驱动，不在这里回读 */
+        if (!seg || (seg->type != SEG_TEXT && seg->type != SEG_DATETIME)) return;
         qp_get_text(f->hCtl, buf, QP_VALUE_MAX);
         eval_set_user_value(g_ctx, f->field_index, buf);
         ui_refresh_current();
@@ -3100,15 +3257,22 @@ static LRESULT CALLBACK main_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         if (hdc) {
             RECT rc, bar;
             HBRUSH b = CreateSolidBrush(theme_line());
+            int one = DPIX(1) > 1 ? DPIX(1) : 1;
             GetClientRect(hwnd, &rc);
             /* 画出分隔条本体：以前这里什么都不画，用户只能靠光标形状猜哪里
                可以拖，拖起来自然没有「抓住了」的感觉。 */
             bar.left   = splitter_x() + QP_SPLIT_HIT / 2;
-            bar.right  = bar.left + (DPIX(1) > 1 ? DPIX(1) : 1);
+            bar.right  = bar.left + one;
             bar.top    = DPIX(36);
             bar.bottom = rc.bottom - DPIX(10);
             if (b) {
                 if (bar.bottom > bar.top) FillRect(hdc, &bar, b);
+                /* 右栏的横分隔条（字段区 ↔ 口径预览） */
+                bar.left   = splitter_x() + QP_SPLIT_HIT + DPIX(1);
+                bar.right  = rc.right - DPIX(8);
+                bar.top    = hsplitter_y(rc.bottom - rc.top) + QP_HSPLIT_HIT / 2;
+                bar.bottom = bar.top + one;
+                if (bar.right > bar.left) FillRect(hdc, &bar, b);
                 DeleteObject(b);
             }
         }
@@ -3127,18 +3291,45 @@ static LRESULT CALLBACK main_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             SetCursor(LoadCursorW(NULL, IDC_SIZEWE));
             return TRUE;
         }
+        if (hsplit_hit(pt.x, pt.y)) {
+            SetCursor(LoadCursorW(NULL, IDC_SIZENS));
+            return TRUE;
+        }
         break;
     }
 
     case WM_LBUTTONDOWN: {
         int x = (short)LOWORD(lp), y = (short)HIWORD(lp);
         int sx = splitter_x();
+        RECT rc;
+        GetClientRect(hwnd, &rc);
         popup_close();
         if (x >= sx && x <= sx + QP_SPLIT_HIT && y > DPIX(30)) {
             g_splitDrag = 1;
             g_splitGrabDx = x - sx;   /* 记住抓取偏移，分隔条不再跳到光标下 */
             SetCapture(hwnd);
+        } else if (hsplit_hit(x, y)) {
+            g_hsplitDrag = 1;
+            g_hsplitGrabDy = y - hsplitter_y(rc.bottom - rc.top);
+            SetCapture(hwnd);
         }
+        return 0;
+    }
+
+    /* 双击任一条分隔条 → 恢复默认（竖条回默认宽度，横条回自动高度）。
+       两条分隔条的交互保持一致，不搞「一条能双击一条不能」。 */
+    case WM_LBUTTONDBLCLK: {
+        int x = (short)LOWORD(lp), y = (short)HIWORD(lp);
+        int sx = splitter_x();
+        if (x >= sx && x <= sx + QP_SPLIT_HIT && y > DPIX(30)) {
+            g_settings.tree_width = QP_TREE_W_DEF;
+        } else if (hsplit_hit(x, y)) {
+            g_settings.preview_height = 0;
+        } else {
+            break;
+        }
+        ui_layout(hwnd);
+        app_save_settings();
         return 0;
     }
 
@@ -3160,13 +3351,30 @@ static LRESULT CALLBACK main_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 g_settings.tree_width = x;
                 ui_layout(hwnd);
             }
+        } else if (g_hsplitDrag) {
+            RECT rc;
+            int y = (short)HIWORD(lp);
+            int H, lo, hi, h;
+            GetClientRect(hwnd, &rc);
+            H = rc.bottom - rc.top;
+            ui_preview_bounds(H, &lo, &hi);
+            /* 往上拖 = 预览变高；公式与 hsplitter_y 互为反函数 */
+            h = H - DPIX(8) - DPIX(28) - DPIX(6) - DPIX(18) - QP_HSPLIT_HIT
+                  - (y - g_hsplitGrabDy);
+            if (h < lo) h = lo;
+            if (h > hi) h = hi;
+            if (h != g_settings.preview_height) {
+                g_settings.preview_height = h;
+                ui_layout(hwnd);
+            }
         }
         return 0;
 
     case WM_LBUTTONUP:
         if (g_dragging) { drag_drop(); return 0; }
-        if (g_splitDrag) {
+        if (g_splitDrag || g_hsplitDrag) {
             g_splitDrag = 0;
+            g_hsplitDrag = 0;
             ReleaseCapture();
             app_save_settings();
         }
@@ -3179,6 +3387,7 @@ static LRESULT CALLBACK main_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             g_dragItem = NULL;
         }
         g_splitDrag = 0;
+        g_hsplitDrag = 0;
         break;
 
     case WM_COMMAND: {
@@ -3427,6 +3636,7 @@ int ui_register_classes(void)
 
     memset(&wc, 0, sizeof(wc));
     wc.cbSize = sizeof(wc);
+    wc.style = CS_DBLCLKS;             /* 双击分隔条恢复默认位置 */
     wc.lpfnWndProc = main_proc;
     wc.hInstance = g_hInst;
     wc.hIcon = LoadIconW(g_hInst, MAKEINTRESOURCEW(IDI_APPICON));

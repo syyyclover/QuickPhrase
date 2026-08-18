@@ -227,6 +227,7 @@ static const char *seg_type_key(SegmentType t)
     case SEG_TEXT:         return "text";
     case SEG_SELECT:       return "select";
     case SEG_MULTI_SELECT: return "multi-select";
+    case SEG_DATETIME:     return "datetime";
     case SEG_STATIC:
     default:               return "static";
     }
@@ -238,7 +239,26 @@ static SegmentType seg_type_from_key(const char *k)
     if (strcmp(k, "text") == 0) return SEG_TEXT;
     if (strcmp(k, "select") == 0) return SEG_SELECT;
     if (strcmp(k, "multi-select") == 0 || strcmp(k, "multiSelect") == 0) return SEG_MULTI_SELECT;
+    if (strcmp(k, "datetime") == 0) return SEG_DATETIME;
     return SEG_STATIC;
+}
+
+static const char *ref_mode_key(RefMode m)
+{
+    switch (m) {
+    case REF_SPLIT:  return "split";
+    case REF_SUBSTR: return "substr";
+    case REF_WHOLE:
+    default:         return "whole";
+    }
+}
+
+static RefMode ref_mode_from_key(const char *k)
+{
+    if (!k) return REF_WHOLE;
+    if (strcmp(k, "split") == 0) return REF_SPLIT;
+    if (strcmp(k, "substr") == 0) return REF_SUBSTR;
+    return REF_WHOLE;
 }
 
 static const char *parse_type_key(ParseRuleType t)
@@ -384,6 +404,16 @@ static cJSON *segment_to_json(const Segment *s)
         if (s->type == SEG_MULTI_SELECT) json_add_w(o, "separator", s->separator);
         if (s->hidden) cJSON_AddBoolToObject(o, "hidden", 1);
         if (s->type == SEG_TEXT && s->multiline) cJSON_AddBoolToObject(o, "multiline", 1);
+        if (s->type == SEG_DATETIME) json_add_w(o, "timeFormat", s->time_format);
+        /* 引用：不引用时整组字段都不写，存档保持干净 */
+        if (s->ref_segment_id[0]) {
+            json_add_w(o, "refSegmentId", s->ref_segment_id);
+            cJSON_AddStringToObject(o, "refMode", ref_mode_key(s->ref_mode));
+            json_add_w(o, "refDelimiter", s->ref_delimiter);
+            cJSON_AddNumberToObject(o, "refIndex", s->ref_index);
+            cJSON_AddNumberToObject(o, "refStart", s->ref_start);
+            cJSON_AddNumberToObject(o, "refLen", s->ref_len);
+        }
     }
     if (s->parse_rules) {
         cJSON *arr = cJSON_AddArrayToObject(o, "parseRules");
@@ -551,6 +581,23 @@ static Segment *segment_from_json(const cJSON *o)
         json_get_w(o, "separator", s->separator, QP_SEP_MAX);
         if (!s->separator[0]) qp_strlcpy(s->separator, L"、", QP_SEP_MAX);
     }
+    if (type == SEG_DATETIME) {
+        json_get_w(o, "timeFormat", s->time_format, QP_FORMAT_MAX);
+        if (!s->time_format[0])
+            qp_strlcpy(s->time_format, qp_time_format_at(0), QP_FORMAT_MAX);
+    }
+    /* 引用：固定片段没有「值」可言，读进来也一律丢掉 */
+    if (type != SEG_STATIC) {
+        json_get_w(o, "refSegmentId", s->ref_segment_id, QP_ID_MAX);
+        s->ref_mode = ref_mode_from_key(json_get_str(o, "refMode", "whole"));
+        json_get_w(o, "refDelimiter", s->ref_delimiter, QP_SEP_MAX);
+        s->ref_index = json_get_int(o, "refIndex", 1);
+        s->ref_start = json_get_int(o, "refStart", 1);
+        s->ref_len = json_get_int(o, "refLen", 0);
+        if (s->ref_index < 1) s->ref_index = 1;
+        if (s->ref_start < 1) s->ref_start = 1;
+        if (s->ref_len < 0) s->ref_len = 0;
+    }
 
     arr = cJSON_GetObjectItemCaseSensitive(o, "options");
     if (cJSON_IsArray(arr)) {
@@ -658,6 +705,7 @@ void settings_defaults(Settings *s)
     s->win_h = 620;
     s->win_maximized = 0;
     s->tree_width = 230;
+    s->preview_height = 0;        /* 0 = 自动（按窗口高度取 1/4） */
     s->minimize_to_tray_hint = 0;
 }
 
@@ -675,6 +723,7 @@ char *settings_to_json(const Settings *s)
     cJSON_AddStringToObject(root, "theme", theme_key(s->theme));
     json_add_w(root, "defaultSeparator", s->default_separator);
     cJSON_AddNumberToObject(root, "treeWidth", s->tree_width);
+    cJSON_AddNumberToObject(root, "previewHeight", s->preview_height);
     cJSON_AddBoolToObject(root, "trayHintShown", s->minimize_to_tray_hint ? 1 : 0);
     json_add_w(root, "dataDir", s->data_dir);
     win = cJSON_AddObjectToObject(root, "window");
@@ -706,6 +755,9 @@ int settings_from_json(const char *utf8, Settings *out)
     if (!out->default_separator[0]) qp_strlcpy(out->default_separator, L"、", QP_SEP_MAX);
     out->tree_width = json_get_int(root, "treeWidth", out->tree_width);
     if (out->tree_width < 120) out->tree_width = 120;
+    /* 0 = 自动；其余按像素存，下限交给界面层夹取（见 ui_preview_height_for） */
+    out->preview_height = json_get_int(root, "previewHeight", out->preview_height);
+    if (out->preview_height < 0) out->preview_height = 0;
     out->minimize_to_tray_hint = json_get_int(root, "trayHintShown", 0) ? 1 : 0;
     json_get_w(root, "dataDir", out->data_dir, QP_PATH_MAX);
     win = cJSON_GetObjectItemCaseSensitive(root, "window");

@@ -157,6 +157,13 @@ static HWND mk_combo(HWND p, int id)
     return qp_create(L"ComboBox", L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 0,
                      0, 0, 10, DPIX(260), p, id);
 }
+/* 可下拉也可自己敲的组合框（时间格式：预置几个够用的，剩下的让人自己写） */
+static HWND mk_combo_edit(HWND p, int id)
+{
+    return qp_create(L"ComboBox", L"",
+                     CBS_DROPDOWN | CBS_AUTOHSCROLL | WS_VSCROLL | WS_TABSTOP, 0,
+                     0, 0, 10, DPIX(220), p, id);
+}
 static HWND mk_list(HWND p, int id, DWORD extra)
 {
     HWND h = qp_create(WC_LISTVIEWW, L"",
@@ -913,7 +920,8 @@ typedef struct {
     int cur;                     /* 当前片段索引 */
 
     HWND hName, hGroup, hSegLbl, hSegList;
-    HWND hAddStatic, hAddText, hAddSelect, hAddMulti, hSegDel, hSegUp, hSegDown;
+    HWND hAddStatic, hAddText, hAddSelect, hAddMulti, hAddTime;
+    HWND hSegDel, hSegUp, hSegDown;
 
     HWND hPropTitle;
     HWND hTypeLbl, hType;
@@ -922,8 +930,11 @@ typedef struct {
     HWND hPlaceLbl, hPlace;
     HWND hDefLbl, hDef;
     HWND hSepLbl, hSep;
+    HWND hFmtLbl, hFmt, hFmtSample;   /* 时间格式 + 实时效果 */
     HWND hHidden;
     HWND hMultiline;
+    HWND hRefLbl, hRef;                       /* 引用哪个变量 */
+    HWND hRefModeLbl, hRefMode, hRefA, hRefB; /* 取整体 / 第 N 段 / 第 N 个字起 */
 
     HWND hOptLbl, hOptList, hOptAdd, hOptEdit, hOptDel, hOptUp, hOptDown;
     HWND hParseLbl, hParseList, hParseAdd, hParseEdit, hParseDel, hParseUp, hParseDown;
@@ -944,10 +955,12 @@ static void ed_update_preview(EditorCtx *c)
     qp_set_text_if_diff(c->hPreview, out);
 }
 
-/* 片段列表里显示的摘要；隐藏 / 多行的变量加个标记，一眼能看出它的形态 */
-static void ed_seg_summary(const Segment *s, wchar_t *out, size_t cap)
+/* 片段列表里显示的摘要；隐藏 / 多行 / 时间格式 / 引用都带个标记，
+   一眼能看出这个变量的形态，不用逐个点开属性区确认 */
+static void ed_seg_summary(const Segment *s, const Template *t, wchar_t *out, size_t cap)
 {
     wchar_t *p;
+    size_t n;
     if (!out || cap == 0) return;
     out[0] = L'\0';
     if (!s) return;
@@ -958,6 +971,19 @@ static void ed_seg_summary(const Segment *s, wchar_t *out, size_t cap)
                    s->hidden ? L"（隐藏）" : L"",
                    (s->type == SEG_TEXT && s->multiline) ? L"（多行）" : L"");
         out[cap - 1] = L'\0';
+        n = wcslen(out);
+        if (s->type == SEG_DATETIME && n + 1 < cap) {
+            _snwprintf(out + n, cap - n, L"（%ls）",
+                       s->time_format[0] ? s->time_format : qp_time_format_at(0));
+            out[cap - 1] = L'\0';
+            n = wcslen(out);
+        }
+        if (s->ref_segment_id[0] && n + 1 < cap) {
+            wchar_t sum[256];
+            seg_ref_summary(s, t, sum, 256);
+            _snwprintf(out + n, cap - n, L"（%ls）", sum);
+            out[cap - 1] = L'\0';
+        }
     }
     /* 列表里不显示换行 */
     for (p = out; *p; ++p) if (*p == L'\r' || *p == L'\n') *p = L' ';
@@ -972,7 +998,7 @@ static void ed_fill_seglist(EditorCtx *c, int select_index)
     for (s = c->t->segments; s; s = s->next, ++i) {
         wchar_t num[16], summary[QP_CONTENT_MAX];
         _snwprintf(num, 16, L"%d", i + 1);
-        ed_seg_summary(s, summary, QP_CONTENT_MAX);
+        ed_seg_summary(s, c->t, summary, QP_CONTENT_MAX);
         lv_set_row(c->hSegList, i, 0, num);
         lv_set_row(c->hSegList, i, 1, seg_type_name(s->type));
         lv_set_row(c->hSegList, i, 2, summary);
@@ -1026,14 +1052,19 @@ static void ed_layout_props(EditorCtx *c)
     int show_label = has && t != SEG_STATIC;
     int show_content = has && t == SEG_STATIC;
     int show_place = has && (t == SEG_TEXT || t == SEG_MULTI_SELECT);
-    int show_def = has && t != SEG_STATIC;
+    /* 时间变量不给默认值：格式就是它的全部配置，再来个默认值就是第二个真相 */
+    int show_def = has && t != SEG_STATIC && t != SEG_DATETIME;
     int show_sep = has && t == SEG_MULTI_SELECT;
+    int show_fmt = has && t == SEG_DATETIME;
     int show_hidden = has && t != SEG_STATIC;
     int show_multi = has && t == SEG_TEXT;
+    int show_ref = has && t != SEG_STATIC;
+    int show_refmode = show_ref && s->ref_segment_id[0] != L'\0';
+    int show_refparam = show_refmode && s->ref_mode != REF_WHOLE;
     int show_opt = has && (t == SEG_SELECT || t == SEG_MULTI_SELECT);
     int show_parse = has && t == SEG_TEXT;
     int show_cond = has;
-    int right;
+    int right, nblock, blockh;
 
     GetClientRect(c->hwnd, &rc);
     right = rc.right - m;
@@ -1060,6 +1091,13 @@ static void ed_layout_props(EditorCtx *c)
     ED_ROW(c->hPlaceLbl, c->hPlace, show_place, 24);
     ED_ROW(c->hDefLbl, c->hDef, show_def, 24);
     ED_ROW(c->hSepLbl, c->hSep, show_sep, 24);
+    ED_ROW(c->hFmtLbl, c->hFmt, show_fmt, 24);
+    /* 格式的实时效果：跟在格式框下方，与它左边对齐，改一个字就能看到结果 */
+    ShowWindow(c->hFmtSample, show_fmt ? SW_SHOW : SW_HIDE);
+    if (show_fmt) {
+        MoveWindow(c->hFmtSample, cx, y, cw, DPIX(18), TRUE);
+        y += DPIX(18) + DPIX(4);
+    }
 
     /* 「隐藏」开关自带文字，不需要左侧标签，与其他控件左对齐即可 */
     ShowWindow(c->hHidden, show_hidden ? SW_SHOW : SW_HIDE);
@@ -1071,6 +1109,37 @@ static void ed_layout_props(EditorCtx *c)
     if (show_multi) {
         MoveWindow(c->hMultiline, cx, y, cw, DPIX(22), TRUE);
         y += DPIX(22) + DPIX(6);
+    }
+
+    ED_ROW(c->hRefLbl, c->hRef, show_ref, 24);
+    /* 「取法」一行：下拉占一半，右边两个小框用占位文字当标签（分隔符 / 第几段，
+       或 从第几个字 / 取几个），按取法显隐 —— 不引用时整行都不出现 */
+    ShowWindow(c->hRefModeLbl, show_refmode ? SW_SHOW : SW_HIDE);
+    ShowWindow(c->hRefMode, show_refmode ? SW_SHOW : SW_HIDE);
+    ShowWindow(c->hRefA, show_refparam ? SW_SHOW : SW_HIDE);
+    ShowWindow(c->hRefB, show_refparam ? SW_SHOW : SW_HIDE);
+    if (show_refmode) {
+        int mw = show_refparam ? (cw - DPIX(8)) / 2 : cw;
+        MoveWindow(c->hRefModeLbl, x, y + DPIX(4), lw, DPIX(18), TRUE);
+        MoveWindow(c->hRefMode, cx, y, mw, DPIX(24), TRUE);
+        if (show_refparam) {
+            int px = cx + mw + DPIX(8);
+            int pw = (right - px - DPIX(6)) / 2;
+            MoveWindow(c->hRefA, px, y, pw, DPIX(24), TRUE);
+            MoveWindow(c->hRefB, px + pw + DPIX(6), y, right - px - pw - DPIX(6),
+                       DPIX(24), TRUE);
+        }
+        y += DPIX(24) + DPIX(4);
+    }
+
+    /* 选项 / 规则区的列表高度：默认 92，属性行多又碰上大缩放比例时按剩余空间
+       等分压缩，保证最后一块不会伸出属性区底部（与左侧片段列表同一条底线） */
+    nblock = (show_opt ? 1 : 0) + (show_parse ? 1 : 0) + (show_cond ? 1 : 0);
+    blockh = DPIX(92);
+    if (nblock > 0) {
+        int each = (DPIX(546) - y) / nblock - (DPIX(22) + DPIX(4) + DPIX(8));
+        if (each < blockh) blockh = each;
+        if (blockh < DPIX(56)) blockh = DPIX(56);
     }
 
     /* 选项 / 规则区：标题行（含右侧按钮）+ 列表 */
@@ -1090,17 +1159,17 @@ static void ed_layout_props(EditorCtx *c)
             MoveWindow((b4), bx, y, sw, bh, TRUE); bx += sw + DPIX(2);          \
             MoveWindow((b5), bx, y, sw, bh, TRUE);                              \
             y += bh + DPIX(4);                                                 \
-            MoveWindow((list), x, y, right - x, DPIX(listh), TRUE);             \
-            y += DPIX(listh) + DPIX(8);                                        \
+            MoveWindow((list), x, y, right - x, (listh), TRUE);                 \
+            y += (listh) + DPIX(8);                                            \
         }                                                                      \
     } while (0)
 
     ED_BLOCK(c->hOptLbl, c->hOptList, c->hOptAdd, c->hOptEdit, c->hOptDel,
-             c->hOptUp, c->hOptDown, show_opt, 92);
+             c->hOptUp, c->hOptDown, show_opt, blockh);
     ED_BLOCK(c->hParseLbl, c->hParseList, c->hParseAdd, c->hParseEdit, c->hParseDel,
-             c->hParseUp, c->hParseDown, show_parse, 92);
+             c->hParseUp, c->hParseDown, show_parse, blockh);
     ED_BLOCK(c->hCondLbl, c->hCondList, c->hCondAdd, c->hCondEdit, c->hCondDel,
-             c->hCondUp, c->hCondDown, show_cond, 92);
+             c->hCondUp, c->hCondDown, show_cond, blockh);
 
 #undef ED_ROW
 #undef ED_BLOCK
@@ -1109,6 +1178,104 @@ static void ed_layout_props(EditorCtx *c)
     ListView_SetColumnWidth(c->hOptList, 0, right - x - DPIX(26));
     ListView_SetColumnWidth(c->hParseList, 0, right - x - DPIX(26));
     ListView_SetColumnWidth(c->hCondList, 0, right - x - DPIX(26));
+}
+
+/* 时间格式的实时效果：拿此刻的时间套一遍格式，改一个字就能看到结果 */
+static void ed_update_fmt_sample(EditorCtx *c)
+{
+    Segment *s = ed_cur_seg(c);
+    wchar_t sample[160], line[192];
+    if (!s || s->type != SEG_DATETIME) {
+        qp_set_text_if_diff(c->hFmtSample, L"");
+        return;
+    }
+    qp_format_time_now(s->time_format, sample, 160);
+    _snwprintf(line, 192, L"效果：%ls", sample);
+    line[191] = L'\0';
+    qp_set_text_if_diff(c->hFmtSample, line);
+}
+
+/* 时间格式：从下拉里选一个，或者自己敲，两条路都落到这里 */
+static void ed_commit_format(EditorCtx *c, int from_list)
+{
+    Segment *s = ed_cur_seg(c);
+    wchar_t buf[QP_FORMAT_MAX];
+    if (!s || c->loading || s->type != SEG_DATETIME) return;
+    buf[0] = L'\0';
+    if (from_list) {
+        /* CBN_SELCHANGE 时编辑框里还是旧文字，得从列表项取 */
+        int sel = (int)SendMessageW(c->hFmt, CB_GETCURSEL, 0, 0);
+        if (sel != CB_ERR &&
+            SendMessageW(c->hFmt, CB_GETLBTEXTLEN, (WPARAM)sel, 0) < QP_FORMAT_MAX)
+            SendMessageW(c->hFmt, CB_GETLBTEXT, (WPARAM)sel, (LPARAM)buf);
+    } else {
+        qp_get_text(c->hFmt, buf, QP_FORMAT_MAX);
+    }
+    qp_strlcpy(s->time_format, buf, QP_FORMAT_MAX);
+    ed_update_fmt_sample(c);
+    ed_update_preview(c);
+}
+
+/* 引用来源下拉：第 0 项固定「不引用」，其余是本模板里除自己以外的变量。
+   会形成环的来源照样列出来，选中时再拦——列表里凭空少几项，人只会以为是 bug。
+   顺手做一件事：来源已经被删掉（悬空）时，把引用清掉，界面与数据保持一个说法。 */
+static void ed_fill_ref_combo(EditorCtx *c)
+{
+    Segment *s = ed_cur_seg(c);
+    const Segment *p;
+    int i = 1, sel = 0;
+    SendMessageW(c->hRef, CB_RESETCONTENT, 0, 0);
+    SendMessageW(c->hRef, CB_ADDSTRING, 0, (LPARAM)L"（不引用）");
+    SendMessageW(c->hRef, CB_SETITEMDATA, 0, (LPARAM)NULL);
+    if (s) {
+        for (p = c->t->segments; p; p = p->next) {
+            if (p == s || p->type == SEG_STATIC) continue;
+            SendMessageW(c->hRef, CB_ADDSTRING, 0, (LPARAM)seg_display_name(p));
+            SendMessageW(c->hRef, CB_SETITEMDATA, (WPARAM)i, (LPARAM)p);
+            if (wcscmp(s->ref_segment_id, p->id) == 0) sel = i;
+            ++i;
+        }
+        if (s->ref_segment_id[0] && sel == 0) s->ref_segment_id[0] = L'\0';
+    }
+    SendMessageW(c->hRef, CB_SETCURSEL, (WPARAM)sel, 0);
+}
+
+/* 取法下拉 + 两个参数框：按当前取法填内容与占位提示 */
+static void ed_load_ref_params(EditorCtx *c)
+{
+    Segment *s = ed_cur_seg(c);
+    int save = c->loading;
+    wchar_t buf[32];
+    c->loading = 1;
+    if (s && s->ref_segment_id[0]) {
+        SendMessageW(c->hRefMode, CB_SETCURSEL, (WPARAM)s->ref_mode, 0);
+        if (s->ref_mode == REF_SPLIT) {
+            SendMessageW(c->hRefA, EM_SETCUEBANNER, 0, (LPARAM)L"分隔符");
+            SendMessageW(c->hRefB, EM_SETCUEBANNER, 0, (LPARAM)L"第几段");
+            SetWindowTextW(c->hRefA, s->ref_delimiter);
+            _snwprintf(buf, 32, L"%d", s->ref_index > 0 ? s->ref_index : 1);
+            SetWindowTextW(c->hRefB, buf);
+        } else if (s->ref_mode == REF_SUBSTR) {
+            SendMessageW(c->hRefA, EM_SETCUEBANNER, 0, (LPARAM)L"从第几个字");
+            SendMessageW(c->hRefB, EM_SETCUEBANNER, 0, (LPARAM)L"取几个（空=到末尾）");
+            _snwprintf(buf, 32, L"%d", s->ref_start > 0 ? s->ref_start : 1);
+            SetWindowTextW(c->hRefA, buf);
+            if (s->ref_len > 0) {
+                _snwprintf(buf, 32, L"%d", s->ref_len);
+                SetWindowTextW(c->hRefB, buf);
+            } else {
+                SetWindowTextW(c->hRefB, L"");
+            }
+        } else {
+            SetWindowTextW(c->hRefA, L"");
+            SetWindowTextW(c->hRefB, L"");
+        }
+    } else {
+        SendMessageW(c->hRefMode, CB_SETCURSEL, 0, 0);
+        SetWindowTextW(c->hRefA, L"");
+        SetWindowTextW(c->hRefB, L"");
+    }
+    c->loading = save;
 }
 
 static void ed_load_props(EditorCtx *c)
@@ -1126,6 +1293,7 @@ static void ed_load_props(EditorCtx *c)
                      s->hidden ? BST_CHECKED : BST_UNCHECKED, 0);
         SendMessageW(c->hMultiline, BM_SETCHECK,
                      s->multiline ? BST_CHECKED : BST_UNCHECKED, 0);
+        SetWindowTextW(c->hFmt, s->time_format);
     } else {
         SendMessageW(c->hType, CB_SETCURSEL, (WPARAM)-1, 0);
         SetWindowTextW(c->hLabel, L"");
@@ -1135,7 +1303,11 @@ static void ed_load_props(EditorCtx *c)
         SetWindowTextW(c->hSep, L"");
         SendMessageW(c->hHidden, BM_SETCHECK, BST_UNCHECKED, 0);
         SendMessageW(c->hMultiline, BM_SETCHECK, BST_UNCHECKED, 0);
+        SetWindowTextW(c->hFmt, L"");
     }
+    ed_update_fmt_sample(c);
+    ed_fill_ref_combo(c);
+    ed_load_ref_params(c);
     ed_fill_optlist(c);
     ed_fill_rulelists(c);
     ed_layout_props(c);
@@ -1158,6 +1330,10 @@ static void ed_commit_props(EditorCtx *c)
     qp_strlcpy(s->default_value, buf, QP_VALUE_MAX);
     qp_get_text(c->hSep, buf, QP_SEP_MAX);
     qp_strlcpy(s->separator, buf, QP_SEP_MAX);
+    if (s->type == SEG_DATETIME) {
+        qp_get_text(c->hFmt, buf, QP_FORMAT_MAX);
+        qp_strlcpy(s->time_format, buf, QP_FORMAT_MAX);
+    }
     s->hidden = (s->type != SEG_STATIC &&
                  SendMessageW(c->hHidden, BM_GETCHECK, 0, 0) == BST_CHECKED) ? 1 : 0;
     s->multiline = (s->type == SEG_TEXT &&
@@ -1171,9 +1347,74 @@ static void ed_refresh_cur_row(EditorCtx *c)
     Segment *s = ed_cur_seg(c);
     wchar_t summary[QP_CONTENT_MAX];
     if (!s) return;
-    ed_seg_summary(s, summary, QP_CONTENT_MAX);
+    ed_seg_summary(s, c->t, summary, QP_CONTENT_MAX);
     lv_set_row(c->hSegList, c->cur, 1, seg_type_name(s->type));
     lv_set_row(c->hSegList, c->cur, 2, summary);
+}
+
+/* ------------------------------ 引用 ------------------------------ */
+
+/* 换引用来源。会成环的选择直接拒绝：A 引用 B、B 又引用 A，两边都算不出值，
+   与「条件项指向不存在的变量一律不成立」同一个态度——宁可不生效，不能乱生效。 */
+static void ed_ref_changed(EditorCtx *c)
+{
+    Segment *s = ed_cur_seg(c);
+    const Segment *pick;
+    if (!s || c->loading) return;
+    pick = combo_selected_seg(c->hRef);
+    if (pick && tmpl_ref_would_cycle(c->t, s, pick->id)) {
+        qp_msgbox(c->hwnd, MB_OK | MB_ICONWARNING, L"不能这样引用",
+                  L"【%ls】已经（直接或间接）引用了【%ls】，反过来再引用会形成"
+                  L"循环，两边都算不出值。", seg_display_name(pick),
+                  seg_display_name(s));
+        ed_fill_ref_combo(c);            /* 退回原来的选择 */
+        return;
+    }
+    qp_strlcpy(s->ref_segment_id, pick ? pick->id : L"", QP_ID_MAX);
+    if (s->ref_segment_id[0]) {
+        if (!s->ref_delimiter[0]) qp_strlcpy(s->ref_delimiter, L"-", QP_SEP_MAX);
+        if (s->ref_index < 1) s->ref_index = 1;
+        if (s->ref_start < 1) s->ref_start = 1;
+    }
+    ed_load_ref_params(c);
+    ed_layout_props(c);                  /* 「取法」那一行随之出现 / 收起 */
+    ed_refresh_cur_row(c);
+    ed_update_preview(c);
+}
+
+static void ed_ref_mode_changed(EditorCtx *c)
+{
+    Segment *s = ed_cur_seg(c);
+    int sel = (int)SendMessageW(c->hRefMode, CB_GETCURSEL, 0, 0);
+    if (!s || c->loading || sel == CB_ERR) return;
+    s->ref_mode = (RefMode)sel;
+    ed_load_ref_params(c);
+    ed_layout_props(c);                  /* 两个参数框按取法显隐 */
+    ed_refresh_cur_row(c);
+    ed_update_preview(c);
+}
+
+static void ed_ref_param_changed(EditorCtx *c)
+{
+    Segment *s = ed_cur_seg(c);
+    wchar_t buf[64];
+    if (!s || c->loading || !s->ref_segment_id[0]) return;
+    if (s->ref_mode == REF_SPLIT) {
+        qp_get_text(c->hRefA, buf, QP_SEP_MAX);
+        qp_strlcpy(s->ref_delimiter, buf, QP_SEP_MAX);
+        qp_get_text(c->hRefB, buf, 64);
+        s->ref_index = _wtoi(buf);
+        if (s->ref_index < 1) s->ref_index = 1;
+    } else if (s->ref_mode == REF_SUBSTR) {
+        qp_get_text(c->hRefA, buf, 64);
+        s->ref_start = _wtoi(buf);
+        if (s->ref_start < 1) s->ref_start = 1;
+        qp_get_text(c->hRefB, buf, 64);
+        s->ref_len = _wtoi(buf);          /* 空 / 0 = 一直取到末尾 */
+        if (s->ref_len < 0) s->ref_len = 0;
+    }
+    ed_refresh_cur_row(c);
+    ed_update_preview(c);
 }
 
 static void ed_add_segment(EditorCtx *c, SegmentType type)
@@ -1204,12 +1445,18 @@ static void ed_add_segment(EditorCtx *c, SegmentType type)
 static void ed_del_segment(EditorCtx *c)
 {
     Segment *s = ed_cur_seg(c);
+    wchar_t id[QP_ID_MAX];
     if (!s) return;
     if (qp_msgbox(c->hwnd, MB_YESNO | MB_ICONQUESTION, L"删除片段",
                   L"确定删除第 %d 个片段吗？", c->cur + 1) != IDYES)
         return;
+    qp_strlcpy(id, s->id, QP_ID_MAX);
     s = seg_list_remove_at(&c->t->segments, c->cur);
     seg_free(s);
+    /* 别人引用了这一个的话，引用一并撤掉：悬空引用本来就不生效，
+       留着只会让人以为还跟着来源在变（与保存时清悬空引用同一口径） */
+    for (s = c->t->segments; s; s = s->next)
+        if (wcscmp(s->ref_segment_id, id) == 0) s->ref_segment_id[0] = L'\0';
     if (c->cur >= seg_list_count(c->t->segments)) c->cur = seg_list_count(c->t->segments) - 1;
     ed_fill_seglist(c, c->cur);
     ed_load_props(c);
@@ -1234,8 +1481,17 @@ static void ed_change_type(EditorCtx *c)
     int sel = (int)SendMessageW(c->hType, CB_GETCURSEL, 0, 0);
     if (!s || sel == CB_ERR || sel == (int)s->type) return;
     s->type = (SegmentType)sel;
-    if (s->type == SEG_STATIC) s->hidden = 0;   /* 固定句本来就不出现在填写界面 */
+    if (s->type == SEG_STATIC) {
+        s->hidden = 0;                    /* 固定句本来就不出现在填写界面 */
+        s->ref_segment_id[0] = L'\0';     /* 固定句没有「值」，引用无从谈起 */
+    }
     if (s->type != SEG_TEXT) s->multiline = 0;  /* 多行只对文本输入有意义 */
+    if (s->type == SEG_DATETIME) {
+        /* 格式就是时间变量的全部配置；留着默认值只会变成第二个真相 */
+        if (!s->time_format[0])
+            qp_strlcpy(s->time_format, qp_time_format_at(0), QP_FORMAT_MAX);
+        s->default_value[0] = L'\0';
+    }
     if (s->type != SEG_STATIC && !s->label[0]) {
         wchar_t name[QP_LABEL_MAX];
         _snwprintf(name, QP_LABEL_MAX, L"变量%d", c->cur + 1);
@@ -1455,11 +1711,12 @@ static void ed_layout(EditorCtx *c)
     y = DPIX(44);
     MoveWindow(c->hSegLbl, listx, y, listw, DPIX(18), TRUE);
     y = DPIX(68);
-    bw = (listw - DPIX(9)) / 4;
+    bw = (listw - DPIX(12)) / 5;
     MoveWindow(c->hAddStatic, listx, y, bw, bh, TRUE);
     MoveWindow(c->hAddText, listx + bw + DPIX(3), y, bw, bh, TRUE);
     MoveWindow(c->hAddSelect, listx + (bw + DPIX(3)) * 2, y, bw, bh, TRUE);
     MoveWindow(c->hAddMulti, listx + (bw + DPIX(3)) * 3, y, bw, bh, TRUE);
+    MoveWindow(c->hAddTime, listx + (bw + DPIX(3)) * 4, y, bw, bh, TRUE);
     y += bh + DPIX(4);
     MoveWindow(c->hSegDel, listx, y, bw, bh, TRUE);
     MoveWindow(c->hSegUp, listx + bw + DPIX(3), y, DPIX(40), bh, TRUE);
@@ -1503,6 +1760,7 @@ static LRESULT CALLBACK editor_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     switch (msg) {
     case WM_CREATE: {
         CREATESTRUCTW *cs = (CREATESTRUCTW *)lp;
+        int fi;
         c = (EditorCtx *)cs->lpCreateParams;
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)c);
         c->hwnd = hwnd;
@@ -1522,6 +1780,7 @@ static LRESULT CALLBACK editor_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         c->hAddText = mk_btn(hwnd, L"+输入", IDC_ED_SEG_ADD_TEXT);
         c->hAddSelect = mk_btn(hwnd, L"+单选", IDC_ED_SEG_ADD_SELECT);
         c->hAddMulti = mk_btn(hwnd, L"+多选", IDC_ED_SEG_ADD_MULTI);
+        c->hAddTime = mk_btn(hwnd, L"+时间", IDC_ED_SEG_ADD_TIME);
         c->hSegDel = mk_btn(hwnd, L"删除", IDC_ED_SEG_DEL);
         c->hSegUp = mk_btn(hwnd, L"↑", IDC_ED_SEG_UP);
         c->hSegDown = mk_btn(hwnd, L"↓", IDC_ED_SEG_DOWN);
@@ -1539,6 +1798,7 @@ static LRESULT CALLBACK editor_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         SendMessageW(c->hType, CB_ADDSTRING, 0, (LPARAM)L"文本输入");
         SendMessageW(c->hType, CB_ADDSTRING, 0, (LPARAM)L"下拉单选");
         SendMessageW(c->hType, CB_ADDSTRING, 0, (LPARAM)L"下拉多选");
+        SendMessageW(c->hType, CB_ADDSTRING, 0, (LPARAM)L"时间日期");
         c->hLabelLbl = mk_label_r(hwnd, L"变量名：", 0);
         c->hLabel = mk_edit(hwnd, IDC_ED_SEG_LABEL, 0);
         c->hContentLbl = mk_label_r(hwnd, L"固定内容：", 0);
@@ -1550,10 +1810,25 @@ static LRESULT CALLBACK editor_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         c->hDef = mk_edit(hwnd, IDC_ED_SEG_DEFAULT, 0);
         c->hSepLbl = mk_label_r(hwnd, L"分隔符：", 0);
         c->hSep = mk_edit(hwnd, IDC_ED_SEG_SEP, 0);
+        c->hFmtLbl = mk_label_r(hwnd, L"时间格式：", 0);
+        c->hFmt = mk_combo_edit(hwnd, IDC_ED_SEG_FORMAT);
+        SendMessageW(c->hFmt, CB_LIMITTEXT, (WPARAM)(QP_FORMAT_MAX - 1), 0);
+        for (fi = 0; fi < qp_time_format_count(); ++fi)
+            SendMessageW(c->hFmt, CB_ADDSTRING, 0, (LPARAM)qp_time_format_at(fi));
+        c->hFmtSample = mk_label(hwnd, L"", IDC_ED_SEG_FMT_SAMPLE);
         c->hHidden = mk_check(hwnd, L"在填写界面隐藏（只由变量匹配 / 默认值填充）",
                               IDC_ED_SEG_HIDDEN);
         c->hMultiline = mk_check(hwnd, L"多行文本框（大段文字，可换行）",
                                  IDC_ED_SEG_MULTILINE);
+        c->hRefLbl = mk_label_r(hwnd, L"引用：", 0);
+        c->hRef = mk_combo(hwnd, IDC_ED_SEG_REF);
+        c->hRefModeLbl = mk_label_r(hwnd, L"取法：", 0);
+        c->hRefMode = mk_combo(hwnd, IDC_ED_SEG_REF_MODE);
+        SendMessageW(c->hRefMode, CB_ADDSTRING, 0, (LPARAM)L"整体");
+        SendMessageW(c->hRefMode, CB_ADDSTRING, 0, (LPARAM)L"按分隔符取第 N 段");
+        SendMessageW(c->hRefMode, CB_ADDSTRING, 0, (LPARAM)L"从第 N 个字起");
+        c->hRefA = mk_edit(hwnd, IDC_ED_SEG_REF_A, 0);
+        c->hRefB = mk_edit(hwnd, IDC_ED_SEG_REF_B, 0);
 
         c->hOptLbl = mk_label(hwnd, L"选项", 0);
         c->hOptAdd = mk_btn(hwnd, L"添加", IDC_ED_OPT_ADD);
@@ -1619,6 +1894,7 @@ static LRESULT CALLBACK editor_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         case IDC_ED_SEG_ADD_TEXT:   ed_add_segment(c, SEG_TEXT); return 0;
         case IDC_ED_SEG_ADD_SELECT: ed_add_segment(c, SEG_SELECT); return 0;
         case IDC_ED_SEG_ADD_MULTI:  ed_add_segment(c, SEG_MULTI_SELECT); return 0;
+        case IDC_ED_SEG_ADD_TIME:   ed_add_segment(c, SEG_DATETIME); return 0;
         case IDC_ED_SEG_DEL:        ed_del_segment(c); return 0;
         case IDC_ED_SEG_UP:         ed_move_segment(c, -1); return 0;
         case IDC_ED_SEG_DOWN:       ed_move_segment(c, +1); return 0;
@@ -1642,6 +1918,23 @@ static LRESULT CALLBACK editor_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 ed_refresh_cur_row(c);
             }
             return 0;
+        case IDC_ED_SEG_FORMAT:
+            /* 下拉里选一个（SELCHANGE）或自己敲（EDITCHANGE），两条路都算改格式 */
+            if (code == CBN_SELCHANGE || code == CBN_EDITCHANGE) {
+                ed_commit_format(c, code == CBN_SELCHANGE);
+                ed_refresh_cur_row(c);
+            }
+            return 0;
+        case IDC_ED_SEG_REF:
+            if (code == CBN_SELCHANGE) ed_ref_changed(c);
+            return 0;
+        case IDC_ED_SEG_REF_MODE:
+            if (code == CBN_SELCHANGE) ed_ref_mode_changed(c);
+            return 0;
+        case IDC_ED_SEG_REF_A:
+        case IDC_ED_SEG_REF_B:
+            if (code == EN_CHANGE && !c->loading) ed_ref_param_changed(c);
+            return 0;
         case IDC_ED_OPT_ADD:   ed_opt_add(c); return 0;
         case IDC_ED_OPT_EDIT:  ed_opt_edit(c); return 0;
         case IDC_ED_OPT_DEL:   ed_opt_del(c); return 0;
@@ -1660,7 +1953,8 @@ static LRESULT CALLBACK editor_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         case IDOK: {
             wchar_t name[QP_NAME_MAX];
             Group *g;
-            int gi;
+            Segment *a, *b;
+            int gi, ia, ib;
             qp_get_text(c->hName, name, QP_NAME_MAX);
             qp_trim(name);
             if (!name[0]) {
@@ -1674,6 +1968,33 @@ static LRESULT CALLBACK editor_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 return 0;
             }
             ed_commit_props(c);
+            /* 变量重名拦下来：规则和引用都是靠变量名认人的，两个同名变量在下拉里
+               长得一模一样，指错了也看不出来（引擎按 id 找不到时还会退回按名字找，
+               只会命中第一个）。改一个名字比事后排查便宜得多。 */
+            for (a = c->t->segments, ia = 0; a; a = a->next, ++ia) {
+                if (a->type == SEG_STATIC || !a->label[0]) continue;
+                for (b = a->next, ib = ia + 1; b; b = b->next, ++ib) {
+                    if (b->type == SEG_STATIC) continue;
+                    if (wcscmp(a->label, b->label) != 0) continue;
+                    qp_msgbox(hwnd, MB_OK | MB_ICONWARNING, L"变量名重复",
+                              L"第 %d 个和第 %d 个片段都叫【%ls】。\n"
+                              L"规则和引用是按变量名认人的，重名会指错，请改一个。",
+                              ia + 1, ib + 1, a->label);
+                    c->cur = ib;
+                    ed_fill_seglist(c, ib);
+                    ed_load_props(c);
+                    SetFocus(c->hLabel);
+                    return 0;
+                }
+            }
+            /* 指向已删除变量的引用（导入的老数据也可能有）直接清掉：它永远不会
+               生效，留在存档里只会让下次打开的人以为还跟着来源在变 */
+            for (a = c->t->segments; a; a = a->next) {
+                if (a->type == SEG_STATIC ||
+                    (a->ref_segment_id[0] &&
+                     !tmpl_find_segment(c->t, a->ref_segment_id)))
+                    a->ref_segment_id[0] = L'\0';
+            }
             qp_strlcpy(c->t->name, name, QP_NAME_MAX);
             gi = (int)SendMessageW(c->hGroup, CB_GETCURSEL, 0, 0);
             g = (gi > 0) ? (Group *)SendMessageW(c->hGroup, CB_GETITEMDATA, (WPARAM)gi, 0)

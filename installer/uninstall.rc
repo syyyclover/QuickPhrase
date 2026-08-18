@@ -9,8 +9,8 @@ IDI_SETUP ICON "res/setup.ico"
 1 24 "installer/setup.manifest"
 
 VS_VERSION_INFO VERSIONINFO
-FILEVERSION     2,0,0,0
-PRODUCTVERSION  2,0,0,0
+FILEVERSION     2,1,0,0
+PRODUCTVERSION  2,1,0,0
 FILEFLAGSMASK   0x3fL
 FILEFLAGS       0x0L
 FILEOS          VOS_NT_WINDOWS32
@@ -23,12 +23,12 @@ BEGIN
         BEGIN
             VALUE "CompanyName",      "QuickPhrase"
             VALUE "FileDescription",  "口径生成器 卸载程序"
-            VALUE "FileVersion",      "2.0.0.0"
+            VALUE "FileVersion",      "2.1.0.0"
             VALUE "InternalName",     "QuickPhrase-Uninstall"
             VALUE "LegalCopyright",   "MIT License"
             VALUE "OriginalFilename", "uninstall.exe"
             VALUE "ProductName",      "口径生成器 QuickPhrase"
-            VALUE "ProductVersion",   "2.0.0.0"
+            VALUE "ProductVersion",   "2.1.0.0"
         END
     END
     BLOCK "VarFileInfo"

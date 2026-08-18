@@ -12,6 +12,7 @@
 
 #include <stddef.h>
 #include <wchar.h>
+#include <time.h>
 
 /* ------------------------------------------------------------------ */
 /* 容量常量                                                            */
@@ -27,11 +28,14 @@
 #define QP_VALUE_MAX     2048         /* 变量取值：要装得下多行大段文字 */
 #define QP_RESULT_MAX    2048
 #define QP_TIME_MAX      32
+#define QP_FORMAT_MAX    64           /* 时间格式串                     */
 #define QP_OUTPUT_MAX    32768
 #define QP_PATH_MAX      520          /* 文件路径缓冲（engine 层不依赖 windows.h） */
 
 /* 规则引擎迭代上限：防止规则互相触发导致死循环 */
 #define QP_EVAL_MAX_PASS 8
+/* 引用链的最大深度：A 引用 B、B 引用 C…… 同时也是成环检测的上限 */
+#define QP_REF_MAX_DEPTH 16
 
 /* ------------------------------------------------------------------ */
 /* 枚举                                                                */
@@ -40,8 +44,16 @@ typedef enum {
     SEG_STATIC = 0,       /* 固定片段  */
     SEG_TEXT = 1,         /* 文本输入  */
     SEG_SELECT = 2,       /* 下拉单选  */
-    SEG_MULTI_SELECT = 3  /* 下拉多选  */
+    SEG_MULTI_SELECT = 3, /* 下拉多选  */
+    SEG_DATETIME = 4      /* 时间日期  */
 } SegmentType;
+
+/* 引用取法：整体 / 按分隔符取第 N 段 / 按字截取 */
+typedef enum {
+    REF_WHOLE = 0,
+    REF_SPLIT = 1,
+    REF_SUBSTR = 2
+} RefMode;
 
 typedef enum {
     PARSE_SPLIT = 0,      /* 按分隔符切割取第 N 段 */
@@ -118,6 +130,16 @@ typedef struct Segment {
     int     hidden;                       /* 1 = 填写界面不显示，只靠
                                              变量匹配/默认值填充      */
     int     multiline;                    /* text：1 = 多行大文本框    */
+    wchar_t time_format[QP_FORMAT_MAX];   /* datetime：格式串，空=默认 */
+    /* 引用：本片段的值直接取自另一个变量（整体或其中一部分）。
+       引用来的值算「推导值」，与规则同级 → 目标在填写界面只读。 */
+    wchar_t ref_segment_id[QP_ID_MAX];    /* 空 = 不引用               */
+    RefMode ref_mode;
+    wchar_t ref_delimiter[QP_SEP_MAX];    /* REF_SPLIT：分隔符         */
+    int     ref_index;                    /* REF_SPLIT：第 N 段，1 起  */
+    int     ref_start;                    /* REF_SUBSTR：第 N 个字，1 起 */
+    int     ref_len;                      /* REF_SUBSTR：取几个字，
+                                             <=0 = 一直取到末尾       */
     ParseRule *parse_rules;
     ConditionRule *condition_rules;
     struct Segment *next;
@@ -157,6 +179,7 @@ typedef struct Settings {
     int      win_x, win_y, win_w, win_h;  /* 上次窗口位置/尺寸         */
     int      win_maximized;
     int      tree_width;                  /* 左侧模板树宽度            */
+    int      preview_height;              /* 口径预览区高度；0 = 自动  */
     int      minimize_to_tray_hint;       /* 是否已提示过「已最小化到托盘」*/
     wchar_t  data_dir[QP_PATH_MAX];       /* 自定义数据目录；空 = 默认 %APPDATA%\QuickPhrase */
 } Settings;
@@ -180,6 +203,8 @@ typedef struct EvalContext {
     const Template *tmpl;
     EvalField *fields;
     int count;
+    int unstable;                       /* 1 = 迭代跑满仍未收敛（规则互相
+                                           覆盖），界面据此提示一句     */
 } EvalContext;
 
 #ifdef __cplusplus
@@ -202,6 +227,14 @@ int      qp_split_take(const wchar_t *src, const wchar_t *delim, int index,
 void     qp_new_id(wchar_t *out, size_t cap, const wchar_t *prefix);
 /* 生成 ISO 时间戳 */
 void     qp_now_iso(wchar_t *out, size_t cap);
+/* 按格式串输出时间：yyyy yy MM M dd d HH H mm m ss s ddd(周一)，
+   其余字符原样保留；fmt 为空时用 yyyy-MM-dd HH:mm:ss */
+void     qp_format_time(const struct tm *tmv, const wchar_t *fmt,
+                        wchar_t *out, size_t cap);
+void     qp_format_time_now(const wchar_t *fmt, wchar_t *out, size_t cap);
+/* 时间格式的预置列表（编辑器下拉用） */
+int      qp_time_format_count(void);
+const wchar_t *qp_time_format_at(int index);
 
 /* --------------------------- 结构体生命周期 ----------------------- */
 Segment       *seg_create(SegmentType type);
@@ -212,6 +245,15 @@ void           seg_add_option(Segment *s, const wchar_t *opt);
 void           seg_remove_option(Segment *s, int index);
 int            seg_move_option(Segment *s, int index, int delta);
 const wchar_t *seg_display_name(const Segment *s);   /* 供 UI 显示 */
+/* 按 s 的引用配置从来源值 src 里取出要用的那部分 */
+void           seg_ref_extract(const Segment *s, const wchar_t *src,
+                               wchar_t *out, size_t cap);
+/* 引用摘要文字（「引用[设备编号]按“-”取第 7 段」），无引用时输出空串 */
+void           seg_ref_summary(const Segment *s, const Template *t,
+                               wchar_t *out, size_t cap);
+/* target 若引用 source_id 会不会形成环（含自引用）。1 = 会，别让它保存 */
+int            tmpl_ref_would_cycle(const Template *t, const Segment *target,
+                                    const wchar_t *source_id);
 
 ParseRule     *parse_rule_create(void);
 void           parse_rule_free(ParseRule *r);
@@ -293,6 +335,8 @@ int          eval_index_of_id(const EvalContext *ctx, const wchar_t *id);
 int          eval_index_of_label(const EvalContext *ctx, const wchar_t *label);
 /* 用户输入（规则推导出值时以规则为准），随后需调用 eval_run */
 void         eval_set_user_value(EvalContext *ctx, int idx, const wchar_t *v);
+/* 恢复「上次推导出的兜底值」：并行填写切回来时用，见 sess_activate */
+void         eval_set_sticky(EvalContext *ctx, int idx, const wchar_t *v);
 /* 执行解析规则 + 条件规则，迭代至稳定 */
 void         eval_run(EvalContext *ctx);
 /* 拼接输出 */

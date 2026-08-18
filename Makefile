@@ -3,7 +3,7 @@
 #
 #  make            构建全部：程序 + 卸载器 + 安装包
 #  make app        只构建 build/QuickPhrase.exe
-#  make setup      构建安装包 dist/QuickPhrase-2.0.0-setup.exe
+#  make setup      构建安装包 dist/QuickPhrase-2.1.0-setup.exe
 #  make test       在本机（Linux/任意平台）编译并运行引擎/存储单元测试
 #  make size       显示产物体积
 #  make clean
@@ -11,7 +11,7 @@
 #  交叉编译工具链：MinGW-w64（x86_64-w64-mingw32-gcc）
 # ==============================================================
 
-VERSION   := 2.0.0
+VERSION   := 2.1.0
 CC        := x86_64-w64-mingw32-gcc
 WINDRES   := x86_64-w64-mingw32-windres
 STRIP     := x86_64-w64-mingw32-strip
