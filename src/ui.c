@@ -33,6 +33,11 @@ static HWND g_hBtnCopy, g_hBtnReset, g_hBtnEdit, g_hHint, g_hPreviewLabel;
 static Template   *g_curTmpl;      /* 当前选中的模板（指向 g_app 中的对象） */
 static EvalContext *g_ctx;         /* 当前模板的求值上下文                  */
 
+/* 填写区一行的度量（都随 DPI 缩放） */
+#define QP_ROW_CTL_H   DPIX(24)     /* 普通控件高度       */
+#define QP_MULTILINE_H DPIX(88)     /* 多行文本框高度     */
+#define QP_ROW_GAP     DPIX(6)      /* 行间距             */
+
 /* 动态字段控件 */
 typedef struct {
     int   field_index;             /* 在 g_ctx->fields 中的下标 */
@@ -40,7 +45,9 @@ typedef struct {
     HWND  hCtl;                    /* Edit / ComboBox / 只读 Edit */
     HWND  hBtn;                    /* multi-select 的下拉按钮     */
     int   y;                       /* 逻辑 y（未减去滚动量）      */
+    int   h;                       /* 控件高度（多行文本框更高）  */
     int   extraIndex;              /* select：为规则值临时追加的项，-1 = 无 */
+    int   readonly;                /* text：当前是否因被规则接管而只读 */
 } FieldCtl;
 
 static FieldCtl *g_fields;
@@ -76,11 +83,14 @@ typedef struct { int kind; wchar_t id[QP_ID_MAX]; } NodeRef;  /* kind: 0=分组 
 static const wchar_t *CLS_MAIN  = L"QuickPhraseMain";
 static const wchar_t *CLS_HOST  = L"QuickPhraseFieldHost";
 static const wchar_t *CLS_POPUP = L"QuickPhraseMultiPopup";
+static const wchar_t *CLS_TABS  = L"QuickPhraseSessionTabs";
 
 static void ui_layout(HWND hwnd);
 static void ui_build_fields(void);
+static void ui_clear_fields(void);
 static void ui_select_template(Template *t);
 static void popup_close(void);
+static void tabs_refresh(void);
 
 /* ================================================================== */
 /* 主题                                                                */
@@ -293,11 +303,22 @@ void qp_get_text(HWND h, wchar_t *buf, size_t cap)
 
 void qp_set_text_if_diff(HWND h, const wchar_t *text)
 {
-    wchar_t cur[QP_VALUE_MAX];
+    wchar_t stackbuf[QP_VALUE_MAX];
+    wchar_t *cur = stackbuf;
+    int len, cap = QP_VALUE_MAX;
     if (!h) return;
     if (!text) text = L"";
-    GetWindowTextW(h, cur, QP_VALUE_MAX);
+    /* 预览框 / 多行输入可能远超 QP_VALUE_MAX：截断着比较会「永远不相等」，
+       每次刷新都重设文本，光标与滚动位置就会跟着跳。 */
+    len = GetWindowTextLengthW(h);
+    if (len >= cap) {
+        cur = (wchar_t *)malloc((size_t)(len + 1) * sizeof(wchar_t));
+        if (!cur) { SetWindowTextW(h, text); return; }
+        cap = len + 1;
+    }
+    GetWindowTextW(h, cur, cap);
     if (wcscmp(cur, text) != 0) SetWindowTextW(h, text);
+    if (cur != stackbuf) free(cur);
 }
 
 int qp_msgbox(HWND owner, UINT type, const wchar_t *title, const wchar_t *fmt, ...)
@@ -1090,7 +1111,7 @@ static void host_reposition(void)
 {
     RECT rc;
     HDWP dwp;
-    int i, labelW = DPIX(96), pad = DPIX(12), ctlH = DPIX(24);
+    int i, labelW = DPIX(96), pad = DPIX(12);
     int btnW = DPIX(26);
     if (!g_hHost || g_fieldCount <= 0 || !g_fields) return;
     GetClientRect(g_hHost, &rc);
@@ -1098,9 +1119,11 @@ static void host_reposition(void)
     for (i = 0; i < g_fieldCount; ++i) {
         FieldCtl *f = &g_fields[i];
         int y = f->y - g_hostScroll;
+        int ctlH = f->h > 0 ? f->h : QP_ROW_CTL_H;
         int cx = pad + labelW + DPIX(8);
         int cw = (rc.right - rc.left) - cx - pad;
         if (cw < DPIX(80)) cw = DPIX(80);
+        /* 多行框：标签跟第一行文字对齐，不跟着框子居中 */
         dwp = qp_defer(dwp, f->hLabel, pad, y + DPIX(4), labelW, DPIX(18));
         if (f->hBtn) {
             dwp = qp_defer(dwp, f->hCtl, cx, y, cw - btnW - DPIX(2), ctlH);
@@ -1234,6 +1257,807 @@ static LRESULT CALLBACK multi_edit_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
 }
 
 /* ================================================================== */
+/* 并行填写：会话 + 右侧顶部标签条                                     */
+/*                                                                    */
+/* 同一个口径可以同时开好几份填写，互不干扰 —— 一边盯 A 群的管控、一边  */
+/* 发 B 群的通知，切到别的口径再切回来也不用重填。                      */
+/*                                                                    */
+/* 生命周期：只有「当前这一份」持有 EvalContext，切走时先把手填值抄进会 */
+/* 话自己的快照再销毁上下文。于是 Session 里绝不保存 Template/Segment   */
+/* 指针 —— 模板一被编辑就会整对象替换，切数据目录时更是先把整份数据释放 */
+/* 掉才通知界面，存指针必然悬空。变量 id 列表在激活时一次抓好，保存取值 */
+/* 时只读 EvalContext，不再回头碰片段。                                */
+/* ================================================================== */
+
+#define QP_SESS_MAX 9              /* 每个口径最多同时开几份（对应 Ctrl+1~9） */
+
+typedef struct {
+    wchar_t   tmpl_id[QP_ID_MAX];  /* 归属模板（只存 id，见上方注释） */
+    wchar_t   name[QP_NAME_MAX];   /* 标签名，可重命名               */
+    int       color;               /* 调色板下标                     */
+    unsigned  used;                /* 最近一次激活的序号             */
+    wchar_t (*ids)[QP_ID_MAX];     /* 变量 id 列表（激活时抓取）     */
+    wchar_t **vals;                /* 与 ids 一一对应；NULL = 没手填过 */
+    int       count;
+} Session;
+
+static Session **g_sess;
+static int       g_sessCount;
+static unsigned  g_sessTick;
+static Session  *g_curSess;        /* 当前这一份；其取值活在 g_ctx 里 */
+
+/* 标签颜色：深浅两种主题下都够醒目，顺序即默认分配顺序 */
+static const COLORREF s_sessPalette[QP_SESS_MAX] = {
+    RGB(88, 148, 214), RGB(96, 176, 120), RGB(224, 152, 72),
+    RGB(198, 108, 176), RGB(214, 96, 96), RGB(88, 176, 190),
+    RGB(180, 168, 88), RGB(120, 132, 214), RGB(140, 146, 158)
+};
+static const wchar_t *s_sessColorName[QP_SESS_MAX] = {
+    L"蓝", L"绿", L"橙", L"紫", L"红", L"青", L"黄", L"靛", L"灰"
+};
+
+static COLORREF sess_color_of(const Session *s)
+{
+    int i = s ? s->color : 0;
+    if (i < 0 || i >= QP_SESS_MAX) i = 0;
+    return s_sessPalette[i];
+}
+
+static void sess_drop_values(Session *s)
+{
+    int i;
+    if (!s) return;
+    if (s->vals) {
+        for (i = 0; i < s->count; ++i) free(s->vals[i]);
+        free(s->vals);
+        s->vals = NULL;
+    }
+    free(s->ids);
+    s->ids = NULL;
+    s->count = 0;
+}
+
+static void sess_free(Session *s)
+{
+    if (!s) return;
+    sess_drop_values(s);
+    free(s);
+}
+
+/* ------------------- 当前模板下的「第几份」查询 ------------------- */
+
+static int sess_visible_count(void)
+{
+    int i, n = 0;
+    if (!g_curTmpl) return 0;
+    for (i = 0; i < g_sessCount; ++i)
+        if (wcscmp(g_sess[i]->tmpl_id, g_curTmpl->id) == 0) ++n;
+    return n;
+}
+
+static Session *sess_visible_at(int vis)
+{
+    int i, n = 0;
+    if (!g_curTmpl || vis < 0) return NULL;
+    for (i = 0; i < g_sessCount; ++i) {
+        if (wcscmp(g_sess[i]->tmpl_id, g_curTmpl->id) != 0) continue;
+        if (n == vis) return g_sess[i];
+        ++n;
+    }
+    return NULL;
+}
+
+static int sess_visible_index(const Session *s)
+{
+    int i, n = 0;
+    if (!s || !g_curTmpl) return -1;
+    for (i = 0; i < g_sessCount; ++i) {
+        if (wcscmp(g_sess[i]->tmpl_id, g_curTmpl->id) != 0) continue;
+        if (g_sess[i] == s) return n;
+        ++n;
+    }
+    return -1;
+}
+
+static int sess_has_input(const Session *s)
+{
+    int i;
+    if (!s) return 0;
+    if (s == g_curSess && g_ctx) {
+        for (i = 0; i < g_ctx->count; ++i)
+            if (g_ctx->fields[i].user_touched && g_ctx->fields[i].user_value[0]) return 1;
+        return 0;
+    }
+    for (i = 0; i < s->count; ++i)
+        if (s->vals && s->vals[i] && s->vals[i][0]) return 1;
+    return 0;
+}
+
+/* ---------------------- 取值的保存与恢复 -------------------------- */
+
+/* 把上下文里的手填值抄进会话。只读 EvalContext，不碰 Segment，因此哪怕
+   整份数据已经被释放（切数据目录）也能安全调用。 */
+static void sess_save(Session *s)
+{
+    int i;
+    if (!s || !g_ctx || !s->vals || s->count != g_ctx->count) return;
+    for (i = 0; i < s->count; ++i) {
+        const EvalField *f = &g_ctx->fields[i];
+        free(s->vals[i]);
+        s->vals[i] = f->user_touched ? qp_wcsdup(f->user_value) : NULL;
+    }
+}
+
+/* 激活一份：建上下文 → 把上次的手填值按变量 id 喂回去 → 重抓 id 列表。
+   只恢复「手填值」，规则推导的部分交给 eval_run 重算，结果与切走前一致。 */
+static void sess_activate(Session *s, const Template *t)
+{
+    wchar_t (*ids)[QP_ID_MAX] = NULL;
+    wchar_t **vals = NULL;
+    int i, n;
+
+    if (!s || !t) return;
+    g_ctx = eval_create(t);
+    g_curSess = s;
+    s->used = ++g_sessTick;
+    if (!g_ctx) return;
+
+    for (i = 0; i < s->count; ++i) {
+        int idx;
+        if (!s->vals || !s->vals[i]) continue;
+        idx = eval_index_of_id(g_ctx, s->ids[i]);
+        if (idx >= 0) eval_set_user_value(g_ctx, idx, s->vals[i]);
+    }
+    eval_run(g_ctx);
+
+    /* 换成新上下文的变量列表：模板可能刚被编辑过（加了/删了/换了变量） */
+    n = g_ctx->count;
+    if (n > 0) {
+        ids  = (wchar_t (*)[QP_ID_MAX])calloc((size_t)n, sizeof(*ids));
+        vals = (wchar_t **)calloc((size_t)n, sizeof(*vals));
+        if (!ids || !vals) { free(ids); free(vals); return; }   /* 保住旧快照 */
+    }
+    sess_drop_values(s);
+    for (i = 0; i < n; ++i)
+        qp_strlcpy(ids[i], g_ctx->fields[i].seg ? g_ctx->fields[i].seg->id : L"",
+                   QP_ID_MAX);
+    s->ids = ids;
+    s->vals = vals;
+    s->count = n;
+}
+
+static void sess_deactivate(void)
+{
+    if (g_curSess) sess_save(g_curSess);
+    if (g_ctx) { eval_destroy(g_ctx); g_ctx = NULL; }
+    g_curSess = NULL;
+}
+
+/* ------------------------- 新建 / 挑选 ---------------------------- */
+
+/* 默认名取「第 N 份」里最小没被占用的 N：关掉中间一份后不会冒出重名 */
+static void sess_default_name(const wchar_t *tmpl_id, wchar_t *out, size_t cap)
+{
+    int n, i;
+    for (n = 1; n <= QP_SESS_MAX + 1; ++n) {
+        wchar_t want[QP_NAME_MAX];
+        int taken = 0;
+        _snwprintf(want, QP_NAME_MAX, L"第 %d 份", n);
+        want[QP_NAME_MAX - 1] = L'\0';
+        for (i = 0; i < g_sessCount; ++i)
+            if (wcscmp(g_sess[i]->tmpl_id, tmpl_id) == 0 &&
+                wcscmp(g_sess[i]->name, want) == 0) { taken = 1; break; }
+        if (!taken) { qp_strlcpy(out, want, cap); return; }
+    }
+    qp_strlcpy(out, L"新的一份", cap);
+}
+
+/* 颜色也挑当前模板里没用过的，两份并行时一眼能分开 */
+static int sess_pick_color(const wchar_t *tmpl_id)
+{
+    int c, i;
+    for (c = 0; c < QP_SESS_MAX; ++c) {
+        int taken = 0;
+        for (i = 0; i < g_sessCount; ++i)
+            if (wcscmp(g_sess[i]->tmpl_id, tmpl_id) == 0 && g_sess[i]->color == c)
+                { taken = 1; break; }
+        if (!taken) return c;
+    }
+    return 0;
+}
+
+static Session *sess_create(const wchar_t *tmpl_id)
+{
+    Session **grown;
+    Session *s = (Session *)calloc(1, sizeof(Session));
+    if (!s) return NULL;
+    qp_strlcpy(s->tmpl_id, tmpl_id, QP_ID_MAX);
+    sess_default_name(tmpl_id, s->name, QP_NAME_MAX);
+    s->color = sess_pick_color(tmpl_id);
+    grown = (Session **)realloc(g_sess, (size_t)(g_sessCount + 1) * sizeof(Session *));
+    if (!grown) { free(s); return NULL; }
+    g_sess = grown;
+    g_sess[g_sessCount++] = s;
+    return s;
+}
+
+/* 选中某个模板时用哪一份：上次用过的那一份；一份都没有就开一份 */
+static Session *sess_pick_for(const wchar_t *tmpl_id)
+{
+    Session *best = NULL;
+    int i;
+    for (i = 0; i < g_sessCount; ++i) {
+        Session *s = g_sess[i];
+        if (wcscmp(s->tmpl_id, tmpl_id) != 0) continue;
+        if (!best || s->used > best->used) best = s;
+    }
+    return best ? best : sess_create(tmpl_id);
+}
+
+/* 数据被整体替换（切数据目录 / 覆盖导入）或模板被删掉后，扔掉无主的会话 */
+static void sess_prune(void)
+{
+    int i, n = 0, lost = 0;
+    for (i = 0; i < g_sessCount; ++i) {
+        Session *s = g_sess[i];
+        if (g_app && tmpl_list_find(g_app->templates, s->tmpl_id)) {
+            g_sess[n++] = s;
+            continue;
+        }
+        if (g_curSess == s) { g_curSess = NULL; lost = 1; }
+        sess_free(s);
+    }
+    g_sessCount = n;
+    if (lost) ui_select_template(NULL);     /* 连当前这份的模板都没了 */
+}
+
+static void sess_free_all(void)
+{
+    int i;
+    for (i = 0; i < g_sessCount; ++i) sess_free(g_sess[i]);
+    free(g_sess);
+    g_sess = NULL;
+    g_sessCount = 0;
+    g_curSess = NULL;
+}
+
+/* ================================================================== */
+/* 标签条（自绘：与多选弹层同一套画法，深色下不会露出系统浅色外观）    */
+/* ================================================================== */
+
+static HWND g_hTabs;
+static int  g_tabsShown = -1;      /* 上次 ShowWindow 的状态，避免反复闪 */
+
+#define QP_TABS_H DPIX(27)
+
+typedef struct { int x, w; } TabBox;
+static TabBox g_tabBox[QP_SESS_MAX];
+static int    g_tabCount;          /* 已量好的标签数 */
+static int    g_tabPlusX, g_tabPlusW;
+static int    g_tabHot = -1;       /* 悬停的标签，-1 = 无 */
+static int    g_tabHotX;           /* 悬停在该标签的 × 上 */
+static int    g_tabPlusHot;
+static int    g_tabMenuVis = -1;   /* 右键菜单作用于第几份，-1 = 当前那份 */
+
+static int tabs_close_w(void)  { return DPIX(16); }
+static COLORREF tabs_hot_bk(void)
+{
+    return g_dark ? RGB(58, 62, 70) : RGB(226, 236, 248);
+}
+static COLORREF tabs_idle_bk(void)
+{
+    return g_dark ? RGB(40, 43, 48) : RGB(235, 238, 242);
+}
+
+/* 量出每个标签的位置。标签数最多 9 个，每次用到时重量一遍就够，省掉一份
+   随时可能过期的缓存。 */
+static void tabs_measure(void)
+{
+    RECT rc;
+    HDC hdc;
+    HFONT old;
+    int i, n, avail, total = 0;
+    int gap = DPIX(3), plusW = DPIX(26), minW = DPIX(46), maxW = DPIX(190);
+
+    g_tabCount = 0;
+    g_tabPlusX = g_tabPlusW = 0;
+    if (!g_hTabs || !g_curTmpl) return;
+    n = sess_visible_count();
+    if (n > QP_SESS_MAX) n = QP_SESS_MAX;
+    GetClientRect(g_hTabs, &rc);
+    avail = rc.right - rc.left - DPIX(2);
+    if (avail <= 0) return;
+
+    hdc = GetDC(g_hTabs);
+    if (!hdc) return;
+    old = (HFONT)SelectObject(hdc, g_fontUI);
+    for (i = 0; i < n; ++i) {
+        Session *s = sess_visible_at(i);
+        SIZE sz;
+        int w;
+        sz.cx = sz.cy = 0;
+        if (s) GetTextExtentPoint32W(hdc, s->name, (int)wcslen(s->name), &sz);
+        /* 左边距 + 圆点 + 间隙 + 文字 + 间隙 + × + 右边距 */
+        w = DPIX(7) + DPIX(8) + DPIX(6) + sz.cx + DPIX(6) + tabs_close_w() + DPIX(4);
+        if (w < minW) w = minW;
+        if (w > maxW) w = maxW;
+        g_tabBox[i].w = w;
+        total += w + gap;
+    }
+    SelectObject(hdc, old);
+    ReleaseDC(g_hTabs, hdc);
+    g_tabCount = n;
+
+    /* 放不下就等比压窄（到下限为止）。最多 9 份，压到下限也还看得见圆点。 */
+    if (n > 0 && total + plusW > avail) {
+        int floorW = DPIX(34);
+        int each = (avail - plusW - n * gap) / n;
+        if (each < floorW) each = floorW;
+        for (i = 0; i < n; ++i)
+            if (g_tabBox[i].w > each) g_tabBox[i].w = each;
+    }
+
+    total = 0;
+    for (i = 0; i < n; ++i) {
+        g_tabBox[i].x = DPIX(1) + total;
+        total += g_tabBox[i].w + gap;
+    }
+    g_tabPlusX = DPIX(1) + total;
+    g_tabPlusW = (n < QP_SESS_MAX) ? plusW : 0;   /* 开满了就不给「+」 */
+}
+
+/* 命中：>=0 为标签下标，-1 空白，-2 「+」。*onClose 置 1 表示落在 × 上 */
+static int tabs_hit(int x, int y, int *onClose)
+{
+    int i;
+    (void)y;
+    if (onClose) *onClose = 0;
+    if (g_tabPlusW && x >= g_tabPlusX && x < g_tabPlusX + g_tabPlusW) return -2;
+    for (i = 0; i < g_tabCount; ++i) {
+        if (x < g_tabBox[i].x || x >= g_tabBox[i].x + g_tabBox[i].w) continue;
+        if (onClose && g_tabCount > 1 &&
+            x >= g_tabBox[i].x + g_tabBox[i].w - tabs_close_w() - DPIX(4))
+            *onClose = 1;
+        return i;
+    }
+    return -1;
+}
+
+/* 画一个 ×（关闭）或 +（新开）：两根线，够清楚也不抢眼 */
+static void tabs_draw_glyph(HDC dc, int cx, int cy, int r, int plus, COLORREF clr)
+{
+    HPEN pen = CreatePen(PS_SOLID, DPIX(1) > 1 ? DPIX(1) : 1, clr);
+    HGDIOBJ old;
+    if (!pen) return;
+    old = SelectObject(dc, pen);
+    if (plus) {
+        MoveToEx(dc, cx - r, cy, NULL);     LineTo(dc, cx + r + 1, cy);
+        MoveToEx(dc, cx, cy - r, NULL);     LineTo(dc, cx, cy + r + 1);
+    } else {
+        MoveToEx(dc, cx - r, cy - r, NULL); LineTo(dc, cx + r + 1, cy + r + 1);
+        MoveToEx(dc, cx + r, cy - r, NULL); LineTo(dc, cx - r - 1, cy + r + 1);
+    }
+    SelectObject(dc, old);
+    DeleteObject(pen);
+}
+
+static void tabs_paint(HWND hwnd)
+{
+    PAINTSTRUCT ps;
+    HDC hdc, mem;
+    HBITMAP bmp, oldBmp;
+    HFONT oldFont;
+    HBRUSH idleBrush, hotBrush, selBrush;
+    RECT rc;
+    int i, cw, ch, cur;
+
+    hdc = BeginPaint(hwnd, &ps);
+    if (!hdc) return;
+    GetClientRect(hwnd, &rc);
+    cw = rc.right - rc.left;
+    ch = rc.bottom - rc.top;
+    if (cw <= 0 || ch <= 0) { EndPaint(hwnd, &ps); return; }
+
+    mem = CreateCompatibleDC(hdc);
+    bmp = mem ? CreateCompatibleBitmap(hdc, cw, ch) : NULL;
+    if (!mem || !bmp) {
+        if (bmp) DeleteObject(bmp);
+        if (mem) DeleteDC(mem);
+        FillRect(hdc, &rc, g_brushBk);
+        EndPaint(hwnd, &ps);
+        return;
+    }
+    oldBmp = (HBITMAP)SelectObject(mem, bmp);
+    oldFont = (HFONT)SelectObject(mem, g_fontUI);
+    SetBkMode(mem, TRANSPARENT);
+    FillRect(mem, &rc, g_brushBk);
+
+    tabs_measure();
+    cur = sess_visible_index(g_curSess);
+    idleBrush = CreateSolidBrush(tabs_idle_bk());
+    hotBrush  = CreateSolidBrush(tabs_hot_bk());
+    selBrush  = CreateSolidBrush(theme_ctl_bk());
+
+    for (i = 0; i < g_tabCount; ++i) {
+        Session *s = sess_visible_at(i);
+        RECT tab, txt;
+        int sel = (i == cur), cy, d = DPIX(8);
+        if (!s) continue;
+        tab.left   = g_tabBox[i].x;
+        tab.right  = tab.left + g_tabBox[i].w;
+        tab.top    = DPIX(2);
+        tab.bottom = ch - DPIX(2);
+        cy = (tab.top + tab.bottom) / 2;
+
+        FillRect(mem, &tab, sel ? selBrush : (i == g_tabHot ? hotBrush : idleBrush));
+        if (sel) {
+            /* 选中的那份底部压一条本份颜色的横杠，和圆点呼应 */
+            RECT bar = tab;
+            HBRUSH cb = CreateSolidBrush(sess_color_of(s));
+            bar.top = bar.bottom - (DPIX(2) > 1 ? DPIX(2) : 1);
+            if (cb) { FillRect(mem, &bar, cb); DeleteObject(cb); }
+        }
+
+        {   /* 颜色圆点 */
+            HBRUSH cb = CreateSolidBrush(sess_color_of(s));
+            HPEN   cp = CreatePen(PS_SOLID, 1, sess_color_of(s));
+            HGDIOBJ ob = cb ? SelectObject(mem, cb) : NULL;
+            HGDIOBJ op = cp ? SelectObject(mem, cp) : NULL;
+            if (cb && cp)
+                Ellipse(mem, tab.left + DPIX(7), cy - d / 2,
+                             tab.left + DPIX(7) + d, cy - d / 2 + d);
+            if (ob) SelectObject(mem, ob);
+            if (op) SelectObject(mem, op);
+            if (cb) DeleteObject(cb);
+            if (cp) DeleteObject(cp);
+        }
+
+        txt = tab;
+        txt.left  += DPIX(7) + d + DPIX(6);
+        txt.right -= (g_tabCount > 1 ? tabs_close_w() + DPIX(4) : DPIX(6));
+        if (txt.right > txt.left) {
+            SetTextColor(mem, sel ? theme_text() : theme_dim());
+            DrawTextW(mem, s->name, -1, &txt,
+                      DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS);
+        }
+
+        /* × 只在选中或悬停时露出来，平时不添乱；只有一份时不给关 */
+        if (g_tabCount > 1 && (sel || i == g_tabHot)) {
+            int bw = tabs_close_w();
+            int hotX = (i == g_tabHot && g_tabHotX);
+            RECT cb2;
+            cb2.right  = tab.right - DPIX(4);
+            cb2.left   = cb2.right - bw;
+            cb2.top    = cy - bw / 2;
+            cb2.bottom = cb2.top + bw;
+            if (hotX) {
+                HBRUSH xb = CreateSolidBrush(g_dark ? RGB(104, 72, 72)
+                                                    : RGB(240, 214, 214));
+                if (xb) { FillRect(mem, &cb2, xb); DeleteObject(xb); }
+            }
+            tabs_draw_glyph(mem, (cb2.left + cb2.right) / 2, cy, DPIX(3),
+                            0, hotX ? theme_text() : theme_dim());
+        }
+    }
+
+    if (g_tabPlusW) {
+        RECT pr;
+        pr.left   = g_tabPlusX;
+        pr.right  = pr.left + g_tabPlusW;
+        pr.top    = DPIX(2);
+        pr.bottom = ch - DPIX(2);
+        if (g_tabPlusHot) FillRect(mem, &pr, hotBrush);
+        tabs_draw_glyph(mem, (pr.left + pr.right) / 2, (pr.top + pr.bottom) / 2,
+                        DPIX(5), 1, g_tabPlusHot ? theme_text() : theme_dim());
+    }
+
+    BitBlt(hdc, 0, 0, cw, ch, mem, 0, 0, SRCCOPY);
+
+    SelectObject(mem, oldFont);
+    SelectObject(mem, oldBmp);
+    DeleteObject(bmp);
+    DeleteDC(mem);
+    if (idleBrush) DeleteObject(idleBrush);
+    if (hotBrush)  DeleteObject(hotBrush);
+    if (selBrush)  DeleteObject(selBrush);
+    EndPaint(hwnd, &ps);
+}
+
+static void tabs_refresh(void)
+{
+    int want = g_curTmpl ? 1 : 0;
+    if (!g_hTabs) return;
+    if (g_tabsShown != want) {
+        ShowWindow(g_hTabs, want ? SW_SHOWNA : SW_HIDE);
+        g_tabsShown = want;
+    }
+    g_tabHot = -1;
+    g_tabHotX = 0;
+    g_tabPlusHot = 0;
+    tabs_measure();
+    InvalidateRect(g_hTabs, NULL, TRUE);
+}
+
+static void tabs_set_hot(int tab, int onClose, int plus)
+{
+    if (tab == g_tabHot && onClose == g_tabHotX && plus == g_tabPlusHot) return;
+    g_tabHot = tab;
+    g_tabHotX = onClose;
+    g_tabPlusHot = plus;
+    if (g_hTabs) InvalidateRect(g_hTabs, NULL, FALSE);
+}
+
+/* ================================================================== */
+/* 标签条的动作                                                        */
+/* ================================================================== */
+
+static void ui_focus_first_field(void)
+{
+    if (g_fieldCount > 0 && g_fields && g_fields[0].hCtl) SetFocus(g_fields[0].hCtl);
+}
+
+/* 切走当前这份、换上另一份。字段控件整批重建：切换时焦点可能还停在上一份
+   的输入框里，而 ui_sync_controls 会跳过持有焦点的框，不重建就会留下一格
+   显示着上一份的内容。 */
+static void sess_rebind(Session *s)
+{
+    ui_clear_fields();
+    sess_deactivate();
+    if (!s || !g_curTmpl) return;
+    sess_activate(s, g_curTmpl);
+    ui_build_fields();
+    ui_refresh_current();
+    tabs_refresh();
+    ui_layout(g_hwndMain);
+}
+
+static void sess_switch_to(int vis)
+{
+    Session *s = sess_visible_at(vis);
+    if (!s || s == g_curSess) return;
+    popup_close();
+    sess_rebind(s);
+    ui_focus_first_field();
+    SetWindowTextW(g_hHint, L"已切到这一份，其他几份的内容都还留着");
+}
+
+static void sess_cycle(int delta)
+{
+    int n = sess_visible_count(), cur;
+    if (n <= 1) return;
+    cur = sess_visible_index(g_curSess);
+    if (cur < 0) cur = 0;
+    sess_switch_to(((cur + delta) % n + n) % n);
+}
+
+static int sess_room_check(void)
+{
+    if (sess_visible_count() < QP_SESS_MAX) return 1;
+    qp_msgbox(g_hwndMain, MB_OK | MB_ICONINFORMATION, QP_APP_TITLE,
+              L"同一个口径最多同时开 %d 份填写。", QP_SESS_MAX);
+    return 0;
+}
+
+static void sess_new(void)
+{
+    Session *s;
+    if (!g_curTmpl || !sess_room_check()) return;
+    popup_close();
+    s = sess_create(g_curTmpl->id);
+    if (!s) return;
+    sess_rebind(s);
+    ui_focus_first_field();
+    SetWindowTextW(g_hHint, L"已新开一份填写，与其他几份互不影响");
+}
+
+/* 复制某一份（连同已填内容），并切到副本上 */
+static void sess_duplicate(int vis)
+{
+    Session *src = sess_visible_at(vis), *dst;
+    int i;
+    if (!src || !g_curTmpl || !sess_room_check()) return;
+    popup_close();
+    if (src == g_curSess) sess_save(src);      /* 先把最新取值落进快照 */
+    dst = sess_create(g_curTmpl->id);
+    if (!dst) return;
+    if (src->count > 0 && src->ids) {
+        dst->ids  = (wchar_t (*)[QP_ID_MAX])calloc((size_t)src->count, sizeof(*dst->ids));
+        dst->vals = (wchar_t **)calloc((size_t)src->count, sizeof(*dst->vals));
+        if (dst->ids && dst->vals) {
+            dst->count = src->count;
+            for (i = 0; i < src->count; ++i) {
+                qp_strlcpy(dst->ids[i], src->ids[i], QP_ID_MAX);
+                dst->vals[i] = (src->vals && src->vals[i])
+                                 ? qp_wcsdup(src->vals[i]) : NULL;
+            }
+        } else {
+            free(dst->ids);  dst->ids = NULL;
+            free(dst->vals); dst->vals = NULL;
+        }
+    }
+    sess_rebind(dst);
+    ui_focus_first_field();
+    SetWindowTextW(g_hHint, L"已复制出一份，内容一样但互不影响");
+}
+
+static void sess_close(int vis)
+{
+    Session *s = sess_visible_at(vis);
+    int i, at = -1, wasCur;
+
+    if (!s || !g_curTmpl) return;
+    if (sess_visible_count() <= 1) {
+        SetWindowTextW(g_hHint, L"至少要留一份；只想清空内容请点「重置」");
+        return;
+    }
+    if (sess_has_input(s) &&
+        qp_msgbox(g_hwndMain, MB_YESNO | MB_ICONWARNING, L"关闭这一份",
+                  L"「%ls」里已经填了内容，关掉就找不回来了，确定吗？",
+                  s->name) != IDYES)
+        return;
+
+    for (i = 0; i < g_sessCount; ++i) if (g_sess[i] == s) { at = i; break; }
+    if (at < 0) return;
+    popup_close();
+    wasCur = (s == g_curSess);
+    if (wasCur) { ui_clear_fields(); sess_deactivate(); }
+    for (i = at; i + 1 < g_sessCount; ++i) g_sess[i] = g_sess[i + 1];
+    --g_sessCount;
+    sess_free(s);
+
+    if (wasCur) {
+        /* 接着显示左边那一份（关掉第一份时显示新的第一份） */
+        sess_rebind(sess_visible_at(vis > 0 ? vis - 1 : 0));
+        ui_focus_first_field();
+    } else {
+        tabs_refresh();
+    }
+    SetWindowTextW(g_hHint, L"已关闭那一份");
+}
+
+static void sess_rename(int vis)
+{
+    Session *s = sess_visible_at(vis);
+    wchar_t name[QP_NAME_MAX];
+    if (!s) return;
+    qp_strlcpy(name, s->name, QP_NAME_MAX);
+    if (!dlg_input(g_hwndMain, L"重命名这一份", L"标签名称：", name, QP_NAME_MAX))
+        return;
+    qp_trim(name);
+    if (!name[0]) return;
+    qp_strlcpy(s->name, name, QP_NAME_MAX);
+    tabs_refresh();
+}
+
+static void sess_set_color(int vis, int color)
+{
+    Session *s = sess_visible_at(vis);
+    if (!s || color < 0 || color >= QP_SESS_MAX) return;
+    s->color = color;
+    tabs_refresh();
+}
+
+/* 菜单命令作用于谁：右键菜单点出来的那份，否则当前这份 */
+static int sess_target_vis(void)
+{
+    return g_tabMenuVis >= 0 ? g_tabMenuVis : sess_visible_index(g_curSess);
+}
+
+static void tabs_context_menu(int vis, int x, int y)
+{
+    HMENU m = CreatePopupMenu();
+    Session *s = sess_visible_at(vis);
+    int cmd;
+    if (!m) return;
+
+    g_tabMenuVis = vis;
+    AppendMenuW(m, MF_STRING, IDM_SESS_NEW, L"新开一份\tCtrl+T");
+    if (s) {
+        HMENU cm = CreatePopupMenu();
+        AppendMenuW(m, MF_STRING, IDM_SESS_DUP, L"复制这一份（连同已填内容）");
+        AppendMenuW(m, MF_SEPARATOR, 0, NULL);
+        AppendMenuW(m, MF_STRING, IDM_SESS_RENAME, L"重命名…");
+        if (cm) {
+            int i;
+            for (i = 0; i < QP_SESS_MAX; ++i)
+                AppendMenuW(cm, MF_STRING, IDM_SESS_COLOR_BASE + i, s_sessColorName[i]);
+            CheckMenuRadioItem(cm, IDM_SESS_COLOR_BASE,
+                               IDM_SESS_COLOR_BASE + QP_SESS_MAX - 1,
+                               IDM_SESS_COLOR_BASE + s->color, MF_BYCOMMAND);
+            AppendMenuW(m, MF_POPUP, (UINT_PTR)cm, L"颜色");
+        }
+        AppendMenuW(m, MF_SEPARATOR, 0, NULL);
+        AppendMenuW(m, MF_STRING | (sess_visible_count() > 1 ? 0 : MF_GRAYED),
+                    IDM_SESS_CLOSE, L"关闭这一份\tCtrl+W");
+    }
+    /* 自己接命令再转发：菜单的 WM_COMMAND 是投递的，等它自己走一圈的话
+       g_tabMenuVis 早被清掉了，命令就会落到「当前那份」身上 */
+    cmd = (int)TrackPopupMenu(m, TPM_RIGHTBUTTON | TPM_LEFTALIGN | TPM_RETURNCMD,
+                              x, y, 0, g_hwndMain, NULL);
+    DestroyMenu(m);
+    if (cmd) SendMessageW(g_hwndMain, WM_COMMAND, (WPARAM)cmd, 0);
+    g_tabMenuVis = -1;
+}
+
+static LRESULT CALLBACK tabs_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
+{
+    switch (msg) {
+    case WM_PAINT:
+        tabs_paint(hwnd);
+        return 0;
+
+    case WM_ERASEBKGND:
+        return 1;                       /* 背景在 WM_PAINT 里一次画完 */
+
+    case WM_SIZE:
+        /* 变窄时标签要压一压，整条重画（只补新露出的一块会留下旧标签） */
+        InvalidateRect(hwnd, NULL, TRUE);
+        return 0;
+
+    case WM_MOUSEMOVE: {
+        TRACKMOUSEEVENT tme;
+        int onClose = 0, hit;
+        tabs_measure();
+        hit = tabs_hit((short)LOWORD(lp), (short)HIWORD(lp), &onClose);
+        tabs_set_hot(hit >= 0 ? hit : -1, onClose, hit == -2);
+        memset(&tme, 0, sizeof(tme));
+        tme.cbSize = sizeof(tme);
+        tme.dwFlags = TME_LEAVE;
+        tme.hwndTrack = hwnd;
+        TrackMouseEvent(&tme);
+        return 0;
+    }
+
+    case WM_MOUSELEAVE:
+        tabs_set_hot(-1, 0, 0);
+        return 0;
+
+    case WM_LBUTTONDOWN: {
+        int onClose = 0, hit;
+        tabs_measure();
+        hit = tabs_hit((short)LOWORD(lp), (short)HIWORD(lp), &onClose);
+        if (hit == -2)            sess_new();
+        else if (hit >= 0 && onClose) sess_close(hit);
+        else if (hit >= 0)        sess_switch_to(hit);
+        else                      popup_close();
+        return 0;
+    }
+
+    case WM_LBUTTONDBLCLK: {
+        int onClose = 0, hit;
+        tabs_measure();
+        hit = tabs_hit((short)LOWORD(lp), (short)HIWORD(lp), &onClose);
+        if (hit >= 0 && !onClose) sess_rename(hit);
+        return 0;
+    }
+
+    case WM_MBUTTONUP: {
+        int hit;
+        tabs_measure();
+        hit = tabs_hit((short)LOWORD(lp), (short)HIWORD(lp), NULL);
+        if (hit >= 0) sess_close(hit);
+        return 0;
+    }
+
+    case WM_RBUTTONUP: {
+        POINT pt;
+        int hit;
+        tabs_measure();
+        pt.x = (short)LOWORD(lp);
+        pt.y = (short)HIWORD(lp);
+        hit = tabs_hit(pt.x, pt.y, NULL);
+        ClientToScreen(hwnd, &pt);
+        tabs_context_menu(hit, pt.x, pt.y);
+        return 0;
+    }
+
+    default:
+        break;
+    }
+    return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+/* ================================================================== */
 /* 字段构建与刷新                                                      */
 /* ================================================================== */
 
@@ -1266,7 +2090,7 @@ static int seg_needs_input(const Segment *s)
 
 static void ui_build_fields(void)
 {
-    int i, count = 0, y = DPIX(10), rowH = DPIX(30);
+    int i, count = 0, y = DPIX(10);
     wchar_t label[QP_LABEL_MAX + 8];
 
     ui_clear_fields();
@@ -1296,6 +2120,7 @@ static void ui_build_fields(void)
         f = &g_fields[g_fieldCount];
         f->field_index = i;
         f->y = y;
+        f->h = (seg->type == SEG_TEXT && seg->multiline) ? QP_MULTILINE_H : QP_ROW_CTL_H;
         f->extraIndex = -1;
         ctlId = IDC_FIELD_BASE + g_fieldCount * IDC_FIELD_STRIDE;
 
@@ -1305,8 +2130,13 @@ static void ui_build_fields(void)
                               0, 0, 10, 10, g_hHost, ctlId + 2);
 
         if (seg->type == SEG_TEXT) {
-            f->hCtl = qp_create(L"Edit", g_ctx->fields[i].value,
-                                ES_AUTOHSCROLL | WS_TABSTOP, WS_EX_CLIENTEDGE,
+            /* 多行：自动换行 + 竖滚动条，回车直接换行（ES_WANTRETURN），
+               主循环里的 IsDialogMessageW 会把回车让给它。 */
+            DWORD st = seg->multiline
+                         ? (ES_MULTILINE | ES_WANTRETURN | ES_AUTOVSCROLL |
+                            WS_VSCROLL | WS_TABSTOP)
+                         : (ES_AUTOHSCROLL | WS_TABSTOP);
+            f->hCtl = qp_create(L"Edit", g_ctx->fields[i].value, st, WS_EX_CLIENTEDGE,
                                 0, 0, 10, 10, g_hHost, ctlId);
             if (seg->placeholder[0])
                 SendMessageW(f->hCtl, EM_SETCUEBANNER, TRUE, (LPARAM)seg->placeholder);
@@ -1328,7 +2158,7 @@ static void ui_build_fields(void)
                                 0, 0, 10, 10, g_hHost, ctlId + 1);
         }
         ++g_fieldCount;
-        y += rowH;
+        y += f->h + QP_ROW_GAP;
     }
 
     g_hostContentH = y + DPIX(4);
@@ -1379,12 +2209,22 @@ static void ui_sync_controls(void)
             if (idx < 0) idx = -1;                    /* CB_ERR / 空值 → 不选中 */
             if ((int)SendMessageW(f->hCtl, CB_GETCURSEL, 0, 0) != idx)
                 SendMessageW(f->hCtl, CB_SETCURSEL, (WPARAM)idx, 0);
-        } else {
-            /* 只有正在输入的文本框才跳过刷新（避免光标跳动）。多选的只读框
-               现在全程持有焦点（弹层不抢焦点），必须照常刷新，否则勾选了也
-               看不到文字变化。 */
-            if (!(seg->type == SEG_TEXT && f->hCtl == focus))
+        } else if (seg->type == SEG_TEXT) {
+            /* 被变量匹配接管的文本框转为只读：手动输入已经不作数了（规则值
+               优先），再让人敲字只会造成「框里是我打的、预览是规则算的」错觉。
+               只读时也照常刷新，框里始终就是最终生效的值。 */
+            int ro = ef->rule_driven ? 1 : 0;
+            if (f->readonly != ro) {
+                SendMessageW(f->hCtl, EM_SETREADONLY, (WPARAM)ro, 0);
+                f->readonly = ro;
+                InvalidateRect(f->hCtl, NULL, TRUE);
+            }
+            if (ro || f->hCtl != focus)
                 qp_set_text_if_diff(f->hCtl, ef->value);
+        } else {
+            /* 多选的只读框现在全程持有焦点（弹层不抢焦点），必须照常刷新，
+               否则勾选了也看不到文字变化。 */
+            qp_set_text_if_diff(f->hCtl, ef->value);
         }
     }
 }
@@ -1407,7 +2247,7 @@ static void ui_select_template(Template *t)
     wchar_t title[QP_NAME_MAX + 32];
 
     ui_clear_fields();
-    if (g_ctx) { eval_destroy(g_ctx); g_ctx = NULL; }
+    sess_deactivate();          /* 顺手把上一份的手填值抄进它自己的快照 */
     g_curTmpl = t;
 
     if (!t) {
@@ -1417,6 +2257,8 @@ static void ui_select_template(Template *t)
         EnableWindow(g_hBtnCopy, FALSE);
         EnableWindow(g_hBtnReset, FALSE);
         EnableWindow(g_hBtnEdit, FALSE);
+        tabs_refresh();
+        ui_layout(g_hwndMain);
         return;
     }
 
@@ -1427,12 +2269,17 @@ static void ui_select_template(Template *t)
     EnableWindow(g_hBtnReset, TRUE);
     EnableWindow(g_hBtnEdit, TRUE);
 
-    g_ctx = eval_create(t);
+    /* 切回来时接着上次那一份填，内容都还在 */
+    sess_activate(sess_pick_for(t->id), t);
     ui_build_fields();
     if (g_fieldCount == 0)
         SetWindowTextW(g_hHint, L"该模板没有需要填写的变量，可直接复制");
+    else if (sess_visible_count() > 1)
+        SetWindowTextW(g_hHint, L"上方标签条可切换同时进行的几份填写（Ctrl+Tab）");
     else
         SetWindowTextW(g_hHint, L"填写后自动套用规则，Ctrl+Enter 可直接复制");
+    tabs_refresh();
+    ui_layout(g_hwndMain);
     ui_refresh_current();
 }
 
@@ -1501,6 +2348,7 @@ void ui_rebuild_tree(const wchar_t *select_template_id)
     int filtering;
 
     if (!g_hTree) return;
+    sess_prune();          /* 模板被删/被整体换掉后，扔掉无主的那几份填写 */
     qp_get_text(g_hSearch, filter, 128);
     qp_trim(filter);
     filtering = filter[0] != L'\0';
@@ -1604,11 +2452,33 @@ static void ui_new_template(void)
     if (dlg_edit_template(g_hwndMain, t, 1)) {
         tmpl_list_append(&g_app->templates, t);
         app_save_data();
-        g_curTmpl = NULL;
+        ui_select_template(NULL);       /* 断开旧选择，让树重建后重新选中新模板 */
         ui_rebuild_tree(t->id);
     } else {
         tmpl_free(t);
     }
+}
+
+/* 插入一份复杂示例模板。示例数据只在首次运行时生成，老用户升级上来看不到，
+   所以从「模板」菜单里也给一个入口。 */
+static void ui_insert_demo_template(void)
+{
+    Template *t;
+    Group *g = tree_selected_group();
+    if (!g_app) return;
+    if (qp_msgbox(g_hwndMain, MB_YESNO | MB_ICONINFORMATION, L"插入示例模板",
+                  L"将新建一份「复杂示例 · 违规处置通报」。\n\n"
+                  L"它把隐藏变量、多行文本、按分隔符取段、按关键词命中、"
+                  L"多条件项规则都用上了，可以照着它试各项功能。\n\n现在插入吗？")
+            != IDYES)
+        return;
+    t = tmpl_create_demo();
+    if (!t) return;
+    if (g) qp_strlcpy(t->group_id, g->id, QP_ID_MAX);
+    tmpl_list_append(&g_app->templates, t);
+    app_save_data();
+    ui_select_template(NULL);
+    ui_rebuild_tree(t->id);
 }
 
 void ui_edit_current(void)
@@ -1845,6 +2715,7 @@ void ui_theme_changed(void)
     popup_close();          /* 弹层自绘配色是打开时取的，换主题直接收起重开 */
     qp_theme_children(g_hwndMain);
     if (g_hHost) qp_theme_children(g_hHost);
+    if (g_hTabs) InvalidateRect(g_hTabs, NULL, TRUE);   /* 标签条也是自绘的 */
     if (s_flushMenuThemes) s_flushMenuThemes();
 }
 
@@ -1874,6 +2745,12 @@ static void ui_build_menu(HWND hwnd)
     AppendMenuW(tpl, MF_STRING, IDM_TPL_EDIT, L"编辑模板(&E)\tCtrl+E");
     AppendMenuW(tpl, MF_STRING, IDM_TPL_DUP, L"复制模板(&D)");
     AppendMenuW(tpl, MF_STRING, IDM_TPL_DELETE, L"删除模板(&R)");
+    AppendMenuW(tpl, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(tpl, MF_STRING, IDM_SESS_NEW, L"新开一份填写(&P)\tCtrl+T");
+    AppendMenuW(tpl, MF_STRING, IDM_SESS_NEXT, L"切到下一份(&K)\tCtrl+Tab");
+    AppendMenuW(tpl, MF_STRING, IDM_SESS_CLOSE, L"关闭当前这一份(&W)\tCtrl+W");
+    AppendMenuW(tpl, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(tpl, MF_STRING, IDM_TPL_DEMO, L"插入示例模板(&X)…");
 
     AppendMenuW(set, MF_STRING, IDM_SETTINGS, L"选项(&O)…");
 
@@ -1956,9 +2833,9 @@ static void ui_layout(HWND hwnd)
     HDWP dwp;
     int m = DPIX(8), searchH = DPIX(24), gap = DPIX(6);
     int treeW, rx, rw, y, previewH, btnH = DPIX(28), btnW = DPIX(104);
-    int W, H, hostTop, hostH, sx;
+    int W, H, hostTop, hostH, sx, tabsH, tabsTop;
 
-    if (!g_hTree) return;
+    if (!hwnd || !g_hTree) return;
     GetClientRect(hwnd, &rc);
     W = rc.right - rc.left;
     H = rc.bottom - rc.top;
@@ -1975,13 +2852,16 @@ static void ui_layout(HWND hwnd)
     if (previewH > DPIX(200)) previewH = DPIX(200);
 
     y = H - m - btnH;
-    hostTop = m + DPIX(22) + gap;
+    /* 没选模板时标签条整条收掉，界面和以前一模一样 */
+    tabsH = (g_curTmpl && g_hTabs) ? QP_TABS_H : 0;
+    tabsTop = m + DPIX(22) + gap;
+    hostTop = tabsTop + (tabsH ? tabsH + DPIX(4) : 0);
     hostH = (y - gap - previewH) - DPIX(18) - gap - hostTop;
     if (hostH < DPIX(40)) hostH = DPIX(40);
 
     /* 一次性提交所有位置变化：逐个 MoveWindow 会让每个控件各自重绘一次，
        拖动边框时看起来就是控件一个个错位跟上，很不流畅。 */
-    dwp = BeginDeferWindowPos(12);
+    dwp = BeginDeferWindowPos(13);
     dwp = qp_defer(dwp, g_hSearch, m, m, treeW, searchH);
     dwp = qp_defer(dwp, g_hTree, m, m + searchH + gap, treeW,
                    H - m * 2 - searchH - gap);
@@ -1995,8 +2875,10 @@ static void ui_layout(HWND hwnd)
     dwp = qp_defer(dwp, g_hPreview, rx, y, rw, previewH);
     dwp = qp_defer(dwp, g_hPreviewLabel, rx, y - DPIX(18), rw, DPIX(16));
     dwp = qp_defer(dwp, g_hHost, rx, hostTop, rw, hostH);
+    if (tabsH) dwp = qp_defer(dwp, g_hTabs, rx, tabsTop, rw, tabsH);
     if (dwp) EndDeferWindowPos(dwp);
 
+    if (tabsH) tabs_measure();         /* 宽度变了，标签得重新排一遍 */
     host_clamp_scroll();
     host_reposition();
     host_update_scroll();
@@ -2152,6 +3034,11 @@ static LRESULT CALLBACK main_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         g_hHost = qp_create(CLS_HOST, L"", WS_VSCROLL | WS_CLIPCHILDREN, 0,
                             0, 0, 10, 10, hwnd, IDC_FIELDHOST);
 
+        /* 并行填写的标签条：没选模板时隐藏，选中后由 ui_layout 让出位置 */
+        g_hTabs = qp_create(CLS_TABS, L"", 0, 0, 0, 0, 10, 10, hwnd, IDC_TABS);
+        ShowWindow(g_hTabs, SW_HIDE);
+        g_tabsShown = 0;
+
         g_hPreviewLabel = qp_create(L"Static", L"口径预览", SS_LEFT, 0,
                                     0, 0, 10, 10, hwnd, IDC_PREVIEW_LABEL);
         g_hPreview = qp_create(L"Edit", L"",
@@ -2303,6 +3190,15 @@ static LRESULT CALLBACK main_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             handle_field_command(id, code);
             return 0;
         }
+        /* 标签条右键菜单的颜色项、以及 Ctrl+1~9 直接跳到第几份 */
+        if (id >= IDM_SESS_COLOR_BASE && id < IDM_SESS_COLOR_BASE + QP_SESS_MAX) {
+            sess_set_color(sess_target_vis(), id - IDM_SESS_COLOR_BASE);
+            return 0;
+        }
+        if (id >= IDM_SESS_SLOT_BASE && id < IDM_SESS_SLOT_BASE + QP_SESS_MAX) {
+            sess_switch_to(id - IDM_SESS_SLOT_BASE);
+            return 0;
+        }
 
         switch (id) {
         case IDC_SEARCH:
@@ -2323,6 +3219,14 @@ static LRESULT CALLBACK main_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         case IDM_TPL_NEW:      ui_new_template(); return 0;
         case IDM_TPL_DUP:      ui_duplicate_template(); return 0;
         case IDM_TPL_DELETE:   ui_delete_template(); return 0;
+        case IDM_TPL_DEMO:     ui_insert_demo_template(); return 0;
+        /* 并行填写：多份互不干扰的填写，标签条在填写区上方 */
+        case IDM_SESS_NEW:     sess_new(); return 0;
+        case IDM_SESS_CLOSE:   sess_close(sess_target_vis()); return 0;
+        case IDM_SESS_RENAME:  sess_rename(sess_target_vis()); return 0;
+        case IDM_SESS_DUP:     sess_duplicate(sess_target_vis()); return 0;
+        case IDM_SESS_NEXT:    sess_cycle(1); return 0;
+        case IDM_SESS_PREV:    sess_cycle(-1); return 0;
         case IDM_GROUP_NEW:    ui_new_group(); return 0;
         case IDM_GROUP_RENAME: ui_rename_group(); return 0;
         case IDM_GROUP_DELETE: ui_delete_group(); return 0;
@@ -2500,6 +3404,9 @@ static LRESULT CALLBACK main_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_DESTROY:
         ui_clear_fields();
         if (g_ctx) { eval_destroy(g_ctx); g_ctx = NULL; }
+        g_curSess = NULL;
+        sess_free_all();
+        g_hTabs = NULL;
         PostQuitMessage(0);
         return 0;
 
@@ -2547,6 +3454,16 @@ int ui_register_classes(void)
     wc.lpszClassName = CLS_POPUP;
     if (!RegisterClassExW(&wc)) return 0;
 
+    memset(&wc, 0, sizeof(wc));
+    wc.cbSize = sizeof(wc);
+    wc.style = CS_DBLCLKS;             /* 双击标签就地重命名 */
+    wc.lpfnWndProc = tabs_proc;
+    wc.hInstance = g_hInst;
+    wc.hCursor = LoadCursorW(NULL, IDC_ARROW);
+    wc.hbrBackground = NULL;
+    wc.lpszClassName = CLS_TABS;
+    if (!RegisterClassExW(&wc)) return 0;
+
     return 1;
 }
 
@@ -2586,6 +3503,20 @@ HACCEL ui_create_accelerators(void)
         { FVIRTKEY | FCONTROL, 'N',       IDM_TPL_NEW },
         { FVIRTKEY | FCONTROL, 'E',       IDM_TPL_EDIT },
         { FVIRTKEY | FCONTROL, 'R',       IDM_RESET },
+        /* 并行填写：新开 / 关闭 / 前后切换 / 直接跳到第 N 份 */
+        { FVIRTKEY | FCONTROL, 'T',       IDM_SESS_NEW },
+        { FVIRTKEY | FCONTROL, 'W',       IDM_SESS_CLOSE },
+        { FVIRTKEY | FCONTROL,           VK_TAB, IDM_SESS_NEXT },
+        { FVIRTKEY | FCONTROL | FSHIFT,  VK_TAB, IDM_SESS_PREV },
+        { FVIRTKEY | FCONTROL, '1',       IDM_SESS_SLOT_BASE + 0 },
+        { FVIRTKEY | FCONTROL, '2',       IDM_SESS_SLOT_BASE + 1 },
+        { FVIRTKEY | FCONTROL, '3',       IDM_SESS_SLOT_BASE + 2 },
+        { FVIRTKEY | FCONTROL, '4',       IDM_SESS_SLOT_BASE + 3 },
+        { FVIRTKEY | FCONTROL, '5',       IDM_SESS_SLOT_BASE + 4 },
+        { FVIRTKEY | FCONTROL, '6',       IDM_SESS_SLOT_BASE + 5 },
+        { FVIRTKEY | FCONTROL, '7',       IDM_SESS_SLOT_BASE + 6 },
+        { FVIRTKEY | FCONTROL, '8',       IDM_SESS_SLOT_BASE + 7 },
+        { FVIRTKEY | FCONTROL, '9',       IDM_SESS_SLOT_BASE + 8 },
         { FVIRTKEY,            VK_ESCAPE, IDM_HIDE_WINDOW },
     };
     return CreateAcceleratorTableW(acc, (int)(sizeof(acc) / sizeof(acc[0])));

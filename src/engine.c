@@ -271,6 +271,7 @@ Segment *seg_clone(const Segment *s)
     qp_strlcpy(c->separator, s->separator, QP_SEP_MAX);
     qp_strlcpy(c->default_value, s->default_value, QP_VALUE_MAX);
     c->hidden = s->hidden;
+    c->multiline = s->multiline;
     if (s->option_count > 0) {
         c->options = (wchar_t **)calloc((size_t)s->option_count, sizeof(wchar_t *));
         if (c->options) {
@@ -976,12 +977,9 @@ void eval_reset(EvalContext *ctx)
     for (i = 0; i < ctx->count; ++i) {
         EvalField *f = &ctx->fields[i];
         f->user_touched = 0;
-        f->user_override = 0;
-        f->has_last_derived = 0;
         f->has_sticky = 0;
         f->rule_driven = 0;
         f->user_value[0] = L'\0';
-        f->last_derived[0] = L'\0';
         f->sticky[0] = L'\0';
         qp_strlcpy(f->value, seg_default_of(f->seg), QP_VALUE_MAX);
     }
@@ -1017,12 +1015,8 @@ void eval_set_user_value(EvalContext *ctx, int idx, const wchar_t *v)
     f = &ctx->fields[idx];
     qp_strlcpy(f->user_value, v ? v : L"", QP_VALUE_MAX);
     f->user_touched = 1;
-    /* 若该字段正被规则驱动，且用户改成了别的值 → 记为「手动覆盖」，
-       直到触发源变化（推导值改变）为止都尊重用户选择。 */
-    if (f->has_last_derived)
-        f->user_override = (wcscmp(f->user_value, f->last_derived) != 0);
-    else
-        f->user_override = 0;
+    /* 注意：手动输入不会压过变量匹配。该字段一旦被规则推导出值，
+       eval_run 里就以规则值为准（详见 eval_run 第 3 步）。 */
 }
 
 /* 解析规则是否命中；命中时 extracted 返回提取到的内容 */
@@ -1172,14 +1166,14 @@ void eval_run(EvalContext *ctx)
             }
         }
 
-        /* 3) 应用：规则值 > 用户输入 > 默认值；但用户手动覆盖时尊重用户 */
+        /* 3) 应用：规则值 > 用户输入 > 默认值。
+           变量匹配（解析规则 / 条件规则）推导出的值一律压过手动输入与手动选择，
+           这样「既能手填又有匹配」的变量不会因为手滑而与口径脱节。 */
         for (i = 0; i < ctx->count; ++i) {
             EvalField *f = &ctx->fields[i];
             wchar_t next[QP_VALUE_MAX];
             if (derived_set[i]) {
-                int override_active = f->user_override && f->has_last_derived &&
-                                      wcscmp(derived[i], f->last_derived) == 0;
-                qp_strlcpy(next, override_active ? f->user_value : derived[i], QP_VALUE_MAX);
+                qp_strlcpy(next, derived[i], QP_VALUE_MAX);
             } else if (f->user_touched) {
                 qp_strlcpy(next, f->user_value, QP_VALUE_MAX);
             } else {
@@ -1194,23 +1188,13 @@ void eval_run(EvalContext *ctx)
         if (!changed) break;
     }
 
-    /* 提交：记录本轮推导值，供下次判断「用户覆盖是否仍然有效」 */
+    /* 提交 */
     for (i = 0; i < ctx->count; ++i) {
         EvalField *f = &ctx->fields[i];
         f->rule_driven = derived_set[i];
-        if (derived_set[i]) {
-            int override_active = f->user_override && f->has_last_derived &&
-                                  wcscmp(derived[i], f->last_derived) == 0;
-            qp_strlcpy(f->last_derived, derived[i], QP_VALUE_MAX);
-            f->has_last_derived = 1;
-            if (derived[i][0]) {          /* 记住推导过的值，作为后续兜底 */
-                qp_strlcpy(f->sticky, derived[i], QP_VALUE_MAX);
-                f->has_sticky = 1;
-            }
-            if (!override_active) f->user_override = 0;
-        } else {
-            f->has_last_derived = 0;
-            f->user_override = 0;
+        if (derived_set[i] && derived[i][0]) {
+            qp_strlcpy(f->sticky, derived[i], QP_VALUE_MAX);  /* 推导过的值留作兜底 */
+            f->has_sticky = 1;
         }
         qp_strlcpy(f->value, work[i], QP_VALUE_MAX);
     }
@@ -1447,6 +1431,150 @@ static void seed_add_cond(Segment *host, const Segment *trigger, CondOperator op
     cond_rule_append(&host->condition_rules, r);
 }
 
+/* 多条件项的规则：先 begin 拿到规则，再逐个 seed_cond_term 加条件项 */
+static ConditionRule *seed_cond_begin(Segment *host, CondJoin join,
+                                      const wchar_t *result)
+{
+    ConditionRule *r = cond_rule_create();
+    if (!r || !host) { cond_rule_free(r); return NULL; }
+    cond_term_list_clear(&r->terms);      /* 丢掉自带的空白项，下面自己加 */
+    r->join = join;
+    qp_strlcpy(r->result_value, result, QP_RESULT_MAX);
+    cond_rule_append(&host->condition_rules, r);
+    return r;
+}
+
+static void seed_cond_term(ConditionRule *r, const Segment *trigger,
+                           CondOperator op, int negate, const wchar_t *match)
+{
+    CondTerm *t;
+    if (!r) return;
+    t = cond_term_create();
+    if (!t) return;
+    qp_strlcpy(t->trigger_segment_id, trigger ? trigger->id : L"", QP_ID_MAX);
+    t->op = op;
+    t->negate = negate;
+    cond_term_set_match(t, match ? match : L"");
+    cond_term_append(&r->terms, t);
+}
+
+static Segment *seed_flag(Segment *s, int hidden, int multiline)
+{
+    if (s) { s->hidden = hidden; s->multiline = multiline; }
+    return s;
+}
+
+/* ------------------------------------------------------------------ */
+/* 复杂示例：一条把所有功能都用上的通报口径，装完就能照着它试            */
+/*                                                                    */
+/* 覆盖：固定片段（含换行）、文本输入、下拉单选、下拉多选、隐藏变量、    */
+/*       多行大文本框、按分隔符取段、按关键词命中、多条件项（全部满足 /  */
+/*       任意满足 / 不满足取反）、以及「变量匹配的结果压过手动选择」。   */
+/* ------------------------------------------------------------------ */
+Template *tmpl_create_demo(void)
+{
+    Template *t = tmpl_create(L"复杂示例 · 违规处置通报");
+    Segment *s_ticket, *s_date, *s_plat, *s_level, *s_kind, *s_action;
+    Segment *s_detail, *s_evid, *s_follow, *s_reviewer, *s_review;
+    ConditionRule *r;
+    static const wchar_t *plat_opts[]   = { L"微信群", L"QQ 群", L"直播间", L"短视频评论区" };
+    static const wchar_t *level_opts[]  = { L"严重", L"一般", L"轻微" };
+    static const wchar_t *kind_opts[]   = { L"辱骂他人", L"刷屏广告", L"发布外链",
+                                            L"诱导私加", L"违规内容" };
+    static const wchar_t *action_opts[] = { L"口头警告", L"禁言 24 小时", L"禁言 7 天",
+                                            L"永久封禁", L"移出并拉黑" };
+    if (!t) return NULL;
+
+    seg_list_append(&t->segments, seed_static(L"【处置通报】\r\n· 工单编号："));
+
+    /* 一个变量喂饱下面一串：日期、等级、处置方式全从工单编号里拆出来 */
+    s_ticket = seed_var(SEG_TEXT, L"工单编号", L"如 GK-20260817-A2-严重-封禁",
+                        L"GK-20260817-A2-严重-封禁");
+    seg_list_append(&t->segments, s_ticket);
+
+    seg_list_append(&t->segments, seed_static(L"\r\n· 发生日期："));
+    s_date = seed_flag(seed_var(SEG_TEXT, L"发生日期", L"由工单编号自动拆出", L""), 1, 0);
+    seg_list_append(&t->segments, s_date);
+
+    seg_list_append(&t->segments, seed_static(L"\r\n· 处置平台："));
+    s_plat = seed_var(SEG_SELECT, L"处置平台", L"", L"微信群");
+    seg_set_options(s_plat, plat_opts, (int)(sizeof(plat_opts) / sizeof(plat_opts[0])));
+    seg_list_append(&t->segments, s_plat);
+
+    seg_list_append(&t->segments, seed_static(L"　违规等级："));
+    s_level = seed_var(SEG_SELECT, L"违规等级", L"", L"一般");
+    seg_set_options(s_level, level_opts, (int)(sizeof(level_opts) / sizeof(level_opts[0])));
+    seg_list_append(&t->segments, s_level);
+
+    seg_list_append(&t->segments, seed_static(L"\r\n· 违规类型："));
+    s_kind = seed_var(SEG_MULTI_SELECT, L"违规类型", L"可多选", L"刷屏广告");
+    seg_set_options(s_kind, kind_opts, (int)(sizeof(kind_opts) / sizeof(kind_opts[0])));
+    seg_list_append(&t->segments, s_kind);
+
+    seg_list_append(&t->segments, seed_static(L"\r\n· 处置方式："));
+    s_action = seed_var(SEG_SELECT, L"处置方式", L"", L"口头警告");
+    seg_set_options(s_action, action_opts,
+                    (int)(sizeof(action_opts) / sizeof(action_opts[0])));
+    seg_list_append(&t->segments, s_action);
+
+    seg_list_append(&t->segments, seed_static(L"\r\n· 处置说明：\r\n"));
+    s_detail = seed_flag(seed_var(SEG_TEXT, L"处置说明",
+                                  L"逐行写清取证时间、截图编号、当事人回应…", L""), 0, 1);
+    seg_list_append(&t->segments, s_detail);
+
+    seg_list_append(&t->segments, seed_static(L"\r\n· 取证情况："));
+    s_evid = seed_flag(seed_var(SEG_TEXT, L"取证情况", L"", L"暂无截图，待补"), 1, 0);
+    seg_list_append(&t->segments, s_evid);
+
+    seg_list_append(&t->segments, seed_static(L"\r\n· 后续要求："));
+    s_follow = seed_flag(seed_var(SEG_TEXT, L"后续要求", L"", L"按常规流程归档即可"), 1, 0);
+    seg_list_append(&t->segments, s_follow);
+
+    seg_list_append(&t->segments, seed_static(L"\r\n· 复核人："));
+    s_reviewer = seed_var(SEG_TEXT, L"复核人", L"留空表示尚未复核", L"");
+    seg_list_append(&t->segments, s_reviewer);
+
+    s_review = seed_flag(seed_var(SEG_TEXT, L"复核状态", L"", L"（待复核）"), 1, 0);
+    seg_list_append(&t->segments, s_review);
+
+    /* --- 解析规则：挂在「工单编号」上，一次输入带出三个变量 --- */
+    /* 按 "-" 取第 2 段 = 日期；不填充值，直接用取到的那一段 */
+    seed_add_parse(s_ticket, L"-", 2, L"", s_date, L"");
+    /* 按 "-" 取第 4 段，命中哪个词就填对应等级 */
+    seed_add_parse(s_ticket, L"-", 4, L"严重", s_level, L"严重");
+    seed_add_parse(s_ticket, L"-", 4, L"一般", s_level, L"一般");
+    seed_add_parse(s_ticket, L"-", 4, L"轻微", s_level, L"轻微");
+    /* 按关键词命中：整串里出现就算，顺序在前的先生效 */
+    seed_add_parse_contains(s_ticket, L"封禁", s_action, L"永久封禁");
+    seed_add_parse_contains(s_ticket, L"拉黑", s_action, L"移出并拉黑");
+    seed_add_parse_contains(s_ticket, L"禁言", s_action, L"禁言 7 天");
+    seed_add_parse_contains(s_ticket, L"警告", s_action, L"口头警告");
+    /* 多行文本里写了「截图」就自动标注附件情况 */
+    seed_add_parse_contains(s_detail, L"截图", s_evid, L"已附截图取证");
+
+    /* --- 条件规则：挂在「后续要求」上，按顺序取第一条命中的 --- */
+    /* 全部满足：等级严重 且 处置方式属于封禁/拉黑 */
+    r = seed_cond_begin(s_follow, COND_JOIN_ALL,
+                        L"2 小时内同步风控组，纳入平台黑名单，并在群内公示");
+    seed_cond_term(r, s_level, OP_EQUALS, 0, L"严重");
+    seed_cond_term(r, s_action, OP_IN, 0, L"永久封禁,移出并拉黑");
+    /* 任意满足：平台在直播间/评论区，或违规类型里有「违规内容」 */
+    r = seed_cond_begin(s_follow, COND_JOIN_ANY,
+                        L"立即截图取证并上报内容安全组，24 小时内回执");
+    seed_cond_term(r, s_plat, OP_IN, 0, L"直播间,短视频评论区");
+    seed_cond_term(r, s_kind, OP_CONTAINS, 0, L"违规内容");
+    /* 带取反：等级「不是」轻微 且 处置说明「不为空」 */
+    r = seed_cond_begin(s_follow, COND_JOIN_ALL, L"抄送组长复核后归档");
+    seed_cond_term(r, s_level, OP_EQUALS, 1, L"轻微");
+    seed_cond_term(r, s_detail, OP_EMPTY, 1, L"");
+
+    /* --- 条件规则：复核人填了就算已复核（同样是「不为空」的写法） --- */
+    r = seed_cond_begin(s_review, COND_JOIN_ALL, L"（已复核）");
+    seed_cond_term(r, s_reviewer, OP_EMPTY, 1, L"");
+
+    return t;
+}
+
 AppData *appdata_create_seed(void)
 {
     AppData *d = appdata_create();
@@ -1520,6 +1648,13 @@ AppData *appdata_create_seed(void)
     seed_add_cond(s_rollback, s_change, OP_CONTAINS, L"缺陷修复", L"升级前已备份，按需手工回滚");
 
     tmpl_list_append(&d->templates, t);
+
+    /* 再放一份把全部功能都用上的复杂示例，方便照着它试规则 */
+    t = tmpl_create_demo();
+    if (t) {
+        if (g) qp_strlcpy(t->group_id, g->id, QP_ID_MAX);
+        tmpl_list_append(&d->templates, t);
+    }
 
     return d;
 }

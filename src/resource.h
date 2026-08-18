@@ -20,6 +20,7 @@
 #define IDC_HINT                1009
 #define IDC_PREVIEW_LABEL       1010
 #define IDC_SEARCH_LABEL        1011
+#define IDC_TABS                1012   /* 并行填写的标签条（自绘） */
 
 /* 动态字段控件 ID 基址（每个字段占 3 个 ID） */
 #define IDC_FIELD_BASE          2000
@@ -45,6 +46,7 @@
 #define IDM_SETTINGS            40030
 #define IDM_OPEN_DATA_DIR       40031
 #define IDM_ABOUT               40032
+#define IDM_TPL_DEMO            40033   /* 插入示例模板（复杂测试案例） */
 
 #define IDM_COPY                40040   /* 加速键：Ctrl+Enter */
 #define IDM_RESET               40041
@@ -56,6 +58,16 @@
 #define IDM_TRAY_EXIT           40051
 #define IDM_TRAY_AUTOSTART      40052
 #define IDM_TRAY_SETTINGS       40053
+
+/* 并行填写（右侧顶部标签条）。一个模板可以同时开多份互不干扰的填写。 */
+#define IDM_SESS_NEW            40060   /* Ctrl+T   */
+#define IDM_SESS_CLOSE          40061   /* Ctrl+W   */
+#define IDM_SESS_RENAME         40062
+#define IDM_SESS_DUP            40063
+#define IDM_SESS_NEXT           40064   /* Ctrl+Tab       */
+#define IDM_SESS_PREV           40065   /* Ctrl+Shift+Tab */
+#define IDM_SESS_COLOR_BASE     40070   /* +0..8 = 调色板 */
+#define IDM_SESS_SLOT_BASE      40080   /* +0..8 = Ctrl+1~9 */
 
 /* 模板编辑器控件 */
 #define IDC_ED_NAME             3001
@@ -98,6 +110,7 @@
 #define IDC_ED_SEG_ADD_SELECT   3038
 #define IDC_ED_SEG_ADD_MULTI    3039
 #define IDC_ED_SEG_HIDDEN       3040
+#define IDC_ED_SEG_MULTILINE    3041   /* 文本输入：多行大文本框 */
 
 /* 规则编辑子对话框 */
 #define IDC_RL_TYPE             3101

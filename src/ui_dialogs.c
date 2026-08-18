@@ -585,10 +585,25 @@ static void cond_row_text(CondDlgCtx *c, int row)
     lv_set_row(c->hList, row, 0, line);
 }
 
+/* 匹配值框的占位提示：跟着「关系」走，一次只说一件事 */
+static const wchar_t *cond_cue_for(CondOperator op)
+{
+    switch (op) {
+    case OP_EQUALS:      return L"填与变量完全一样的值，例如：数据库服务器";
+    case OP_STARTS_WITH: return L"填开头的文字，例如：数据库";
+    case OP_ENDS_WITH:   return L"填结尾的文字，例如：服务器";
+    case OP_IN:          return L"填一个值即可，多个值请用「添加条件」逐条添加";
+    case OP_EMPTY:       return L"「为空」不需要匹配值";
+    default:             return L"填变量里出现的文字，例如：数据库";
+    }
+}
+
 static void cond_sync_enable(CondDlgCtx *c)
 {
     int on = cond_term_at(c->rule->terms, lv_sel(c->hList)) != NULL;
     int needs = on && cond_op_needs_value(cond_op_from_combo(c->hOp));
+    SendMessageW(c->hMatch, EM_SETCUEBANNER, TRUE,
+                 (LPARAM)cond_cue_for(cond_op_from_combo(c->hOp)));
     EnableWindow(c->hTrigLbl, on);
     EnableWindow(c->hTrigger, on);
     EnableWindow(c->hOpLbl, on);
@@ -732,13 +747,13 @@ static LRESULT CALLBACK cond_dlg_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         c->hMatchLbl = mk_label_r(hwnd, L"匹配值：", 0);
         c->hMatch = mk_edit(hwnd, IDC_RL_MATCH, 0);
         SendMessageW(c->hMatch, EM_SETCUEBANNER, TRUE,
-                     (LPARAM)L"「属于列表」可用逗号 / 、 分隔多个值");
+                     (LPARAM)cond_cue_for(OP_CONTAINS));
         MoveWindow(c->hMatchLbl, m, y + DPIX(4), lw, DPIX(18), TRUE);
         MoveWindow(c->hMatch, cx, y, cw, DPIX(24), TRUE);
         y += DPIX(30);
 
         tip = mk_label(hwnd,
-                       L"勾选「取反」可表达「不包含 / 不等于 / 不为空」；「为空」不需要匹配值。",
+                       L"要多个值就点「添加条件」；勾选「取反」可表达「不包含 / 不等于」。",
                        IDC_RL_TIP);
         MoveWindow(tip, m, y, full, DPIX(18), TRUE);
         y += DPIX(26);
@@ -908,6 +923,7 @@ typedef struct {
     HWND hDefLbl, hDef;
     HWND hSepLbl, hSep;
     HWND hHidden;
+    HWND hMultiline;
 
     HWND hOptLbl, hOptList, hOptAdd, hOptEdit, hOptDel, hOptUp, hOptDown;
     HWND hParseLbl, hParseList, hParseAdd, hParseEdit, hParseDel, hParseUp, hParseDown;
@@ -928,7 +944,7 @@ static void ed_update_preview(EditorCtx *c)
     qp_set_text_if_diff(c->hPreview, out);
 }
 
-/* 片段列表里显示的摘要；隐藏的变量加个标记，一眼能看出它不出现在填写界面 */
+/* 片段列表里显示的摘要；隐藏 / 多行的变量加个标记，一眼能看出它的形态 */
 static void ed_seg_summary(const Segment *s, wchar_t *out, size_t cap)
 {
     wchar_t *p;
@@ -938,8 +954,9 @@ static void ed_seg_summary(const Segment *s, wchar_t *out, size_t cap)
     if (s->type == SEG_STATIC) {
         qp_strlcpy(out, s->content, cap);
     } else {
-        _snwprintf(out, cap, L"【%ls】%ls", seg_display_name(s),
-                   s->hidden ? L"（隐藏）" : L"");
+        _snwprintf(out, cap, L"【%ls】%ls%ls", seg_display_name(s),
+                   s->hidden ? L"（隐藏）" : L"",
+                   (s->type == SEG_TEXT && s->multiline) ? L"（多行）" : L"");
         out[cap - 1] = L'\0';
     }
     /* 列表里不显示换行 */
@@ -1012,6 +1029,7 @@ static void ed_layout_props(EditorCtx *c)
     int show_def = has && t != SEG_STATIC;
     int show_sep = has && t == SEG_MULTI_SELECT;
     int show_hidden = has && t != SEG_STATIC;
+    int show_multi = has && t == SEG_TEXT;
     int show_opt = has && (t == SEG_SELECT || t == SEG_MULTI_SELECT);
     int show_parse = has && t == SEG_TEXT;
     int show_cond = has;
@@ -1047,6 +1065,11 @@ static void ed_layout_props(EditorCtx *c)
     ShowWindow(c->hHidden, show_hidden ? SW_SHOW : SW_HIDE);
     if (show_hidden) {
         MoveWindow(c->hHidden, cx, y, cw, DPIX(22), TRUE);
+        y += DPIX(22) + DPIX(6);
+    }
+    ShowWindow(c->hMultiline, show_multi ? SW_SHOW : SW_HIDE);
+    if (show_multi) {
+        MoveWindow(c->hMultiline, cx, y, cw, DPIX(22), TRUE);
         y += DPIX(22) + DPIX(6);
     }
 
@@ -1101,6 +1124,8 @@ static void ed_load_props(EditorCtx *c)
         SetWindowTextW(c->hSep, s->separator);
         SendMessageW(c->hHidden, BM_SETCHECK,
                      s->hidden ? BST_CHECKED : BST_UNCHECKED, 0);
+        SendMessageW(c->hMultiline, BM_SETCHECK,
+                     s->multiline ? BST_CHECKED : BST_UNCHECKED, 0);
     } else {
         SendMessageW(c->hType, CB_SETCURSEL, (WPARAM)-1, 0);
         SetWindowTextW(c->hLabel, L"");
@@ -1109,6 +1134,7 @@ static void ed_load_props(EditorCtx *c)
         SetWindowTextW(c->hDef, L"");
         SetWindowTextW(c->hSep, L"");
         SendMessageW(c->hHidden, BM_SETCHECK, BST_UNCHECKED, 0);
+        SendMessageW(c->hMultiline, BM_SETCHECK, BST_UNCHECKED, 0);
     }
     ed_fill_optlist(c);
     ed_fill_rulelists(c);
@@ -1119,7 +1145,8 @@ static void ed_load_props(EditorCtx *c)
 static void ed_commit_props(EditorCtx *c)
 {
     Segment *s = ed_cur_seg(c);
-    wchar_t buf[QP_CONTENT_MAX];
+    /* 一个缓冲喂所有属性框：容量取最大的那个（默认值可以是多行大段文字） */
+    wchar_t buf[QP_VALUE_MAX > QP_CONTENT_MAX ? QP_VALUE_MAX : QP_CONTENT_MAX];
     if (!s || c->loading) return;
     qp_get_text(c->hLabel, buf, QP_LABEL_MAX);
     qp_strlcpy(s->label, buf, QP_LABEL_MAX);
@@ -1133,6 +1160,8 @@ static void ed_commit_props(EditorCtx *c)
     qp_strlcpy(s->separator, buf, QP_SEP_MAX);
     s->hidden = (s->type != SEG_STATIC &&
                  SendMessageW(c->hHidden, BM_GETCHECK, 0, 0) == BST_CHECKED) ? 1 : 0;
+    s->multiline = (s->type == SEG_TEXT &&
+                    SendMessageW(c->hMultiline, BM_GETCHECK, 0, 0) == BST_CHECKED) ? 1 : 0;
     ed_update_preview(c);
 }
 
@@ -1206,6 +1235,7 @@ static void ed_change_type(EditorCtx *c)
     if (!s || sel == CB_ERR || sel == (int)s->type) return;
     s->type = (SegmentType)sel;
     if (s->type == SEG_STATIC) s->hidden = 0;   /* 固定句本来就不出现在填写界面 */
+    if (s->type != SEG_TEXT) s->multiline = 0;  /* 多行只对文本输入有意义 */
     if (s->type != SEG_STATIC && !s->label[0]) {
         wchar_t name[QP_LABEL_MAX];
         _snwprintf(name, QP_LABEL_MAX, L"变量%d", c->cur + 1);
@@ -1522,6 +1552,8 @@ static LRESULT CALLBACK editor_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         c->hSep = mk_edit(hwnd, IDC_ED_SEG_SEP, 0);
         c->hHidden = mk_check(hwnd, L"在填写界面隐藏（只由变量匹配 / 默认值填充）",
                               IDC_ED_SEG_HIDDEN);
+        c->hMultiline = mk_check(hwnd, L"多行文本框（大段文字，可换行）",
+                                 IDC_ED_SEG_MULTILINE);
 
         c->hOptLbl = mk_label(hwnd, L"选项", 0);
         c->hOptAdd = mk_btn(hwnd, L"添加", IDC_ED_OPT_ADD);
@@ -1604,6 +1636,7 @@ static LRESULT CALLBACK editor_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             }
             return 0;
         case IDC_ED_SEG_HIDDEN:
+        case IDC_ED_SEG_MULTILINE:
             if (code == BN_CLICKED && !c->loading) {
                 ed_commit_props(c);
                 ed_refresh_cur_row(c);

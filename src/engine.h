@@ -24,10 +24,10 @@
 #define QP_SEP_MAX       16
 #define QP_KEYWORD_MAX   128
 #define QP_MATCH_MAX     256
-#define QP_VALUE_MAX     512
-#define QP_RESULT_MAX    512
+#define QP_VALUE_MAX     2048         /* 变量取值：要装得下多行大段文字 */
+#define QP_RESULT_MAX    2048
 #define QP_TIME_MAX      32
-#define QP_OUTPUT_MAX    16384
+#define QP_OUTPUT_MAX    32768
 #define QP_PATH_MAX      520          /* 文件路径缓冲（engine 层不依赖 windows.h） */
 
 /* 规则引擎迭代上限：防止规则互相触发导致死循环 */
@@ -117,6 +117,7 @@ typedef struct Segment {
     wchar_t default_value[QP_VALUE_MAX];
     int     hidden;                       /* 1 = 填写界面不显示，只靠
                                              变量匹配/默认值填充      */
+    int     multiline;                    /* text：1 = 多行大文本框    */
     ParseRule *parse_rules;
     ConditionRule *condition_rules;
     struct Segment *next;
@@ -168,13 +169,11 @@ typedef struct EvalField {
     wchar_t value[QP_VALUE_MAX];        /* 当前生效值（UI 显示 / 输出）*/
     wchar_t user_value[QP_VALUE_MAX];   /* 用户最近一次手动输入        */
     int     user_touched;               /* 用户是否手动输入过          */
-    int     user_override;              /* 用户手动覆盖了规则推导值    */
-    wchar_t last_derived[QP_VALUE_MAX]; /* 上次规则推导值              */
-    int     has_last_derived;
     wchar_t sticky[QP_VALUE_MAX];       /* 规则曾推导出的值（不随规则
                                            失配而清空，见 eval_run）  */
     int     has_sticky;
-    int     rule_driven;                /* 本次求值是否由规则推导得到  */
+    int     rule_driven;                /* 本次求值是否由规则推导得到
+                                           （规则值优先，手动输入让位）*/
 } EvalField;
 
 typedef struct EvalContext {
@@ -248,6 +247,9 @@ void           group_free(Group *g);
 AppData       *appdata_create(void);
 void           appdata_free(AppData *d);
 AppData       *appdata_create_seed(void);   /* 首次运行的示例数据 */
+/* 复杂示例模板：把全部功能（隐藏变量 / 多行文本 / 两类解析规则 / 多条件项
+   规则）都用上，首次运行时随示例数据一起装，也可从「模板」菜单再插一份 */
+Template      *tmpl_create_demo(void);
 
 /* --------------------------- 链表操作 ----------------------------- */
 int      seg_list_count(const Segment *head);
@@ -289,7 +291,7 @@ void         eval_destroy(EvalContext *ctx);
 void         eval_reset(EvalContext *ctx);                 /* 回到默认值 */
 int          eval_index_of_id(const EvalContext *ctx, const wchar_t *id);
 int          eval_index_of_label(const EvalContext *ctx, const wchar_t *label);
-/* 用户输入（会记录 user_override），随后需调用 eval_run */
+/* 用户输入（规则推导出值时以规则为准），随后需调用 eval_run */
 void         eval_set_user_value(EvalContext *ctx, int idx, const wchar_t *v);
 /* 执行解析规则 + 条件规则，迭代至稳定 */
 void         eval_run(EvalContext *ctx);
