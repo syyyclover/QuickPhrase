@@ -734,8 +734,8 @@ static void popup_toggle(int row)
     popup_apply();
 }
 
-/* 细分隔线颜色（分隔条、弹层滚动条） */
-static COLORREF theme_line(void)
+/* 细分隔线颜色（分隔条、弹层滚动条）；ui_dialogs.c 的编辑器分隔条也用它 */
+COLORREF theme_line(void)
 {
     return g_dark ? RGB(62, 66, 74) : RGB(205, 210, 218);
 }
@@ -1058,11 +1058,13 @@ static void popup_open(int field_index, HWND anchor)
 /* ================================================================== */
 
 /* 批量移动控件：同一批位置变化合并成一次 EndDeferWindowPos 提交，避免逐个
-   MoveWindow 造成的「一格一格挪」和闪烁。位置没变的控件直接跳过。 */
-static HDWP qp_defer(HDWP dwp, HWND h, int x, int y, int w, int ht)
+   MoveWindow 造成的「一格一格挪」和闪烁。位置没变的控件直接跳过。
+   ui_dialogs.c 的编辑器布局也用它（声明在 ui.h），只此一份实现。 */
+HDWP qp_defer(HDWP dwp, HWND h, int x, int y, int w, int ht)
 {
     RECT rc;
     HWND parent;
+    UINT flags = SWP_NOZORDER | SWP_NOACTIVATE;
     if (!dwp || !h) return dwp;
     if (w < 0) w = 0;
     if (ht < 0) ht = 0;
@@ -1072,8 +1074,13 @@ static HDWP qp_defer(HDWP dwp, HWND h, int x, int y, int w, int ht)
     if (rc.left == x && rc.top == y &&
         rc.right - rc.left == w && rc.bottom - rc.top == ht)
         return dwp;
-    return DeferWindowPos(dwp, h, NULL, x, y, w, ht,
-                          SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOCOPYBITS);
+    /* 尺寸没变、只是挪位置时不要加 SWP_NOCOPYBITS：让系统把原来的像素直接搬到
+       新位置，控件就不必重绘一遍。拖分隔条时跟着上下走的那些标签（「口径预览」
+       「提示行」…）正是因为每格都被重绘一次，才会「文字闪一下」。
+       尺寸变了就必须整块重绘，否则拉伸出来的是被拷贝过来的旧像素。 */
+    if (rc.right - rc.left != w || rc.bottom - rc.top != ht)
+        flags |= SWP_NOCOPYBITS;
+    return DeferWindowPos(dwp, h, NULL, x, y, w, ht, flags);
 }
 
 /* 内容变短 / 可视区变高时把滚动位置收回来，否则底部会露出空白 */
@@ -2966,7 +2973,7 @@ static void ui_layout(HWND hwnd)
     HDWP dwp;
     int m = DPIX(8), searchH = DPIX(24), gap = DPIX(6);
     int treeW, rx, rw, y, previewH, btnH = DPIX(28), btnW = DPIX(104);
-    int W, H, hostTop, hostH, sx, sy, tabsH, tabsTop;
+    int W, H, hostTop, hostH, sx, sy, tabsH, tabsTop, dirty;
 
     if (!hwnd || !g_hTree) return;
     GetClientRect(hwnd, &rc);
@@ -3019,7 +3026,11 @@ static void ui_layout(HWND hwnd)
     /* 只重刷分隔条挪动过的那一竖条。旧实现在这里 InvalidateRect(hwnd, NULL,
        TRUE)：主窗口当时还没有 WS_CLIPCHILDREN，整片擦背景会把字段区和它的
        标签一起涂掉，而标签的位置没变、系统不会主动重绘它，于是「产品名称：
-       版本号：…」那一列就整列消失了。 */
+       版本号：…」那一列就整列消失了。
+       现在一律用 RDW_NOERASE：背景由 WM_PAINT 连同分隔条一趟画完（见那里的
+       注释），再让系统单独擦一遍就等于把条子涂掉又画回来——拖动时看到的
+       「边框抽搐」就是这一擦一画。 */
+    dirty = 0;
     sx = m + treeW;
     if (g_splitLastX != sx) {
         RECT strip;
@@ -3027,8 +3038,9 @@ static void ui_layout(HWND hwnd)
         strip.right  = (g_splitLastX > sx ? g_splitLastX : sx) + QP_SPLIT_HIT + DPIX(2);
         strip.top    = 0;
         strip.bottom = H;
-        InvalidateRect(hwnd, &strip, TRUE);
+        RedrawWindow(hwnd, &strip, NULL, RDW_INVALIDATE | RDW_NOERASE);
         g_splitLastX = sx;
+        dirty = 1;
     }
     /* 横分隔条同理：只重刷它挪过的那一横条 */
     sy = hsplitter_y(H);
@@ -3038,9 +3050,13 @@ static void ui_layout(HWND hwnd)
         strip.right  = rx + rw;
         strip.top    = (g_hsplitLastY < 0 ? sy : (g_hsplitLastY < sy ? g_hsplitLastY : sy)) - DPIX(2);
         strip.bottom = (g_hsplitLastY > sy ? g_hsplitLastY : sy) + QP_HSPLIT_HIT + DPIX(2);
-        InvalidateRect(hwnd, &strip, TRUE);
+        RedrawWindow(hwnd, &strip, NULL, RDW_INVALIDATE | RDW_NOERASE);
         g_hsplitLastY = sy;
+        dirty = 1;
     }
+    /* 连同上面 EndDeferWindowPos 让出来的空档，攒成一次 WM_PAINT 立刻画完。
+       不立刻画的话，下一个 WM_MOUSEMOVE 会插在中间，一次拖动就分几趟落地。 */
+    if (dirty) RedrawWindow(hwnd, NULL, NULL, RDW_UPDATENOW | RDW_NOERASE);
 }
 
 /* ================================================================== */
@@ -3255,25 +3271,54 @@ static LRESULT CALLBACK main_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         PAINTSTRUCT ps;
         HDC hdc = BeginPaint(hwnd, &ps);
         if (hdc) {
-            RECT rc, bar;
-            HBRUSH b = CreateSolidBrush(theme_line());
+            RECT rc, bar, clip = ps.rcPaint;
+            HDC dc = hdc, mem = NULL;
+            HBITMAP bmp = NULL, oldBmp = NULL;
+            HBRUSH b;
+            int cw = clip.right - clip.left, ch = clip.bottom - clip.top;
             int one = DPIX(1) > 1 ? DPIX(1) : 1;
             GetClientRect(hwnd, &rc);
+            /* 背景与分隔条在离屏位图上一趟画完再整块贴上。
+               以前是 WM_ERASEBKGND 先把背景涂一遍、WM_PAINT 再把线画上去，屏幕上
+               就是「条子被涂掉 → 条子又出现」两步；拖动时每格都来一次，看起来
+               就是边框在抽搐。现在 WM_ERASEBKGND 什么都不做（见那里的注释），
+               擦与画合成一次 BitBlt，中间态不会露到屏幕上。 */
+            if (cw > 0 && ch > 0 && (mem = CreateCompatibleDC(hdc)) != NULL) {
+                bmp = CreateCompatibleBitmap(hdc, cw, ch);
+                if (bmp) {
+                    oldBmp = (HBITMAP)SelectObject(mem, bmp);
+                    /* 把离屏位图的坐标原点对到客户区坐标，下面的计算不用改 */
+                    SetViewportOrgEx(mem, -clip.left, -clip.top, NULL);
+                    dc = mem;
+                } else {
+                    DeleteDC(mem);
+                    mem = NULL;
+                }
+            }
+            FillRect(dc, &clip, g_brushBk);
+            b = CreateSolidBrush(theme_line());
             /* 画出分隔条本体：以前这里什么都不画，用户只能靠光标形状猜哪里
                可以拖，拖起来自然没有「抓住了」的感觉。 */
-            bar.left   = splitter_x() + QP_SPLIT_HIT / 2;
-            bar.right  = bar.left + one;
-            bar.top    = DPIX(36);
-            bar.bottom = rc.bottom - DPIX(10);
             if (b) {
-                if (bar.bottom > bar.top) FillRect(hdc, &bar, b);
+                bar.left   = splitter_x() + QP_SPLIT_HIT / 2;
+                bar.right  = bar.left + one;
+                bar.top    = DPIX(36);
+                bar.bottom = rc.bottom - DPIX(10);
+                if (bar.bottom > bar.top) FillRect(dc, &bar, b);
                 /* 右栏的横分隔条（字段区 ↔ 口径预览） */
                 bar.left   = splitter_x() + QP_SPLIT_HIT + DPIX(1);
                 bar.right  = rc.right - DPIX(8);
                 bar.top    = hsplitter_y(rc.bottom - rc.top) + QP_HSPLIT_HIT / 2;
                 bar.bottom = bar.top + one;
-                if (bar.right > bar.left) FillRect(hdc, &bar, b);
+                if (bar.right > bar.left) FillRect(dc, &bar, b);
                 DeleteObject(b);
+            }
+            if (mem) {
+                SetViewportOrgEx(mem, 0, 0, NULL);
+                BitBlt(hdc, clip.left, clip.top, cw, ch, mem, 0, 0, SRCCOPY);
+                SelectObject(mem, oldBmp);
+                DeleteObject(bmp);
+                DeleteDC(mem);
             }
         }
         EndPaint(hwnd, &ps);
@@ -3573,14 +3618,11 @@ static LRESULT CALLBACK main_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         break;
     }
 
-    case WM_ERASEBKGND: {
-        RECT rc;
-        /* 主窗口带 WS_CLIPCHILDREN，这次填充不会再涂到子控件上（这正是标签列
-           偶发消失的根因：以前整片涂完，位置未变的 Static 不会自动重绘）。 */
-        GetClientRect(hwnd, &rc);
-        FillRect((HDC)wp, &rc, g_brushBk);
+    case WM_ERASEBKGND:
+        /* 什么都不做，只声称「已经擦过了」：背景连同分隔条由 WM_PAINT 在离屏
+           位图上一趟画完（见那里的注释）。这里再涂一遍就会让分隔条先消失一帧，
+           拖动时表现为边框抽搐。子控件自带 WS_CLIPCHILDREN，不受影响。 */
         return 1;
-    }
 
     case WM_SETTINGCHANGE:
         if (lp && wcscmp((const wchar_t *)lp, L"ImmersiveColorSet") == 0 &&

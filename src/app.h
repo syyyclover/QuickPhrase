@@ -23,7 +23,7 @@
 
 #define QP_APP_NAME    L"QuickPhrase"
 #define QP_APP_TITLE   L"口径生成器"
-#define QP_APP_VERSION L"2.1.0"
+#define QP_APP_VERSION L"2.2.0"
 
 /* ---------------------- 全局状态（定义在 main.c） ------------------ */
 extern HINSTANCE g_hInst;
@@ -59,6 +59,7 @@ COLORREF theme_ctl_bk(void);
 COLORREF theme_text(void);
 COLORREF theme_dim(void);
 COLORREF theme_accent(void);
+COLORREF theme_line(void);      /* 分隔条 / 细分隔线（ui.c 实现，编辑器也用） */
 
 /* ---------------------- main.c ------------------------------------ */
 void app_tray_add(void);

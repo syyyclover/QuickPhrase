@@ -706,6 +706,8 @@ void settings_defaults(Settings *s)
     s->win_maximized = 0;
     s->tree_width = 230;
     s->preview_height = 0;        /* 0 = 自动（按窗口高度取 1/4） */
+    s->editor_w = s->editor_h = 0;         /* 0 = 用编辑器的设计尺寸 */
+    s->editor_preview_height = 0;          /* 0 = 用编辑器的设计高度 */
     s->minimize_to_tray_hint = 0;
 }
 
@@ -724,6 +726,9 @@ char *settings_to_json(const Settings *s)
     json_add_w(root, "defaultSeparator", s->default_separator);
     cJSON_AddNumberToObject(root, "treeWidth", s->tree_width);
     cJSON_AddNumberToObject(root, "previewHeight", s->preview_height);
+    cJSON_AddNumberToObject(root, "editorW", s->editor_w);
+    cJSON_AddNumberToObject(root, "editorH", s->editor_h);
+    cJSON_AddNumberToObject(root, "editorPreviewHeight", s->editor_preview_height);
     cJSON_AddBoolToObject(root, "trayHintShown", s->minimize_to_tray_hint ? 1 : 0);
     json_add_w(root, "dataDir", s->data_dir);
     win = cJSON_AddObjectToObject(root, "window");
@@ -758,6 +763,14 @@ int settings_from_json(const char *utf8, Settings *out)
     /* 0 = 自动；其余按像素存，下限交给界面层夹取（见 ui_preview_height_for） */
     out->preview_height = json_get_int(root, "previewHeight", out->preview_height);
     if (out->preview_height < 0) out->preview_height = 0;
+    /* 模板编辑器的窗口尺寸与预览高度：同样是 0 = 用设计值，其余交界面层夹取 */
+    out->editor_w = json_get_int(root, "editorW", out->editor_w);
+    out->editor_h = json_get_int(root, "editorH", out->editor_h);
+    if (out->editor_w < 0) out->editor_w = 0;
+    if (out->editor_h < 0) out->editor_h = 0;
+    out->editor_preview_height =
+        json_get_int(root, "editorPreviewHeight", out->editor_preview_height);
+    if (out->editor_preview_height < 0) out->editor_preview_height = 0;
     out->minimize_to_tray_hint = json_get_int(root, "trayHintShown", 0) ? 1 : 0;
     json_get_w(root, "dataDir", out->data_dir, QP_PATH_MAX);
     win = cJSON_GetObjectItemCaseSensitive(root, "window");

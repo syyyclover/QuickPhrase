@@ -30,6 +30,7 @@ static void ensure_class(const wchar_t *cls, WNDPROC proc)
     if (GetClassInfoExW(g_hInst, cls, &wc)) return;
     memset(&wc, 0, sizeof(wc));
     wc.cbSize = sizeof(wc);
+    wc.style = CS_DBLCLKS;         /* 双击分隔条恢复默认高度（模板编辑器） */
     wc.lpfnWndProc = proc;
     wc.hInstance = g_hInst;
     wc.hCursor = LoadCursorW(NULL, IDC_ARROW);
@@ -40,15 +41,19 @@ static void ensure_class(const wchar_t *cls, WNDPROC proc)
     RegisterClassExW(&wc);
 }
 
-/* 创建一个以 owner 为父的模态窗口，客户区大小为 cw × ch（逻辑像素） */
-static HWND make_dlg(const wchar_t *cls, WNDPROC proc, const wchar_t *title,
-                     int cw, int ch, HWND owner, void *param)
+/* 创建一个以 owner 为父的模态窗口，客户区大小为 cw × ch（逻辑像素）。
+   extra 里可以再加 WS_THICKFRAME 之类（模板编辑器要能拉大）。 */
+static HWND make_dlg_ex(const wchar_t *cls, WNDPROC proc, const wchar_t *title,
+                        int cw, int ch, HWND owner, void *param, DWORD extra)
 {
     RECT rc;
-    DWORD style = WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_CLIPCHILDREN;
+    DWORD style = WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_CLIPCHILDREN | extra;
     DWORD ex = WS_EX_DLGMODALFRAME | WS_EX_CONTROLPARENT;
     HWND hwnd;
 
+    /* 可缩放的窗口用普通边框：WS_EX_DLGMODALFRAME 的双线边框与 WS_THICKFRAME
+       叠在一起时，拉伸边其实是那圈粗框，视觉上却像细框，很难瞄准 */
+    if (extra & WS_THICKFRAME) ex &= ~(DWORD)WS_EX_DLGMODALFRAME;
     ensure_class(cls, proc);
     rc.left = 0; rc.top = 0; rc.right = DPIX(cw); rc.bottom = DPIX(ch);
     AdjustWindowRectEx(&rc, style, FALSE, ex);
@@ -58,6 +63,12 @@ static HWND make_dlg(const wchar_t *cls, WNDPROC proc, const wchar_t *title,
     if (!hwnd) return NULL;
     qp_center_window(hwnd, owner);
     return hwnd;
+}
+
+static HWND make_dlg(const wchar_t *cls, WNDPROC proc, const wchar_t *title,
+                     int cw, int ch, HWND owner, void *param)
+{
+    return make_dlg_ex(cls, proc, title, cw, ch, owner, param, 0);
 }
 
 /*
@@ -911,6 +922,13 @@ static int dlg_cond_rule(HWND owner, ConditionRule *rule, const Template *t,
 /* 模板编辑器                                                          */
 /* ================================================================== */
 
+/* 设计尺寸 = 能缩到的最小尺寸；窗口可以往大拉，多出来的空间给列表和预览。
+   长模板（上百个片段）在这里编辑时，能拉大 + 预览能拖高才看得过来。 */
+#define ED_MIN_W       880
+#define ED_MIN_H       662
+#define ED_PREVIEW_DEF 46          /* 默认值预览的设计高度 */
+#define ED_SPLIT_HIT   DPIX(8)     /* 预览分隔条的命中高度 */
+
 typedef struct {
     HWND hwnd;
     Template *t;
@@ -927,6 +945,7 @@ typedef struct {
     HWND hTypeLbl, hType;
     HWND hLabelLbl, hLabel;
     HWND hContentLbl, hContent;
+    HWND hHint;                       /* 固定内容下方的占位符提示（灰字一行） */
     HWND hPlaceLbl, hPlace;
     HWND hDefLbl, hDef;
     HWND hSepLbl, hSep;
@@ -941,7 +960,68 @@ typedef struct {
     HWND hCondLbl, hCondList, hCondAdd, hCondEdit, hCondDel, hCondUp, hCondDown;
 
     HWND hPreviewLbl, hPreview;
+    int  splitDrag;              /* 正在拖预览分隔条 */
+    int  splitGrabDy;            /* 按下点相对分隔条上沿的偏移 */
+    int  splitLastY;             /* 上次画出的分隔条位置，-1 = 还没画过 */
 } EditorCtx;
+
+/* ------------------- 编辑器的可变几何（与主窗口同一套做法） -------- */
+
+/* 默认值预览的高度区间：上限按「上半部分至少留 DPIX(180)」反推 */
+static void ed_preview_bounds(int H, int *lo, int *hi)
+{
+    int minH = DPIX(32);
+    int maxH = H - DPIX(12) - DPIX(26) - DPIX(8) - DPIX(18) - ED_SPLIT_HIT
+                 - DPIX(130) - DPIX(180);
+    if (maxH < minH) maxH = minH;
+    *lo = minH;
+    *hi = maxH;
+}
+
+/* 0 = 用设计高度。与 ui_preview_height_for 同一纪律：只读夹取，不回写设置 */
+static int ed_preview_height_for(int H)
+{
+    int lo, hi, h = g_settings.editor_preview_height;
+    ed_preview_bounds(H, &lo, &hi);
+    if (h <= 0) h = DPIX(ED_PREVIEW_DEF);
+    if (h < lo) h = lo;
+    if (h > hi) h = hi;
+    return h;
+}
+
+/* 预览分隔条的上沿；也就是上半部分（片段列表 / 属性区）的底线 */
+static int ed_splitter_y(int H)
+{
+    return H - DPIX(12) - DPIX(26) - DPIX(8) - ed_preview_height_for(H)
+             - DPIX(18) - ED_SPLIT_HIT;
+}
+
+/* 片段列表宽度 / 属性区左沿 / 上半部分底线：三处布局共用一份口径 */
+static void ed_metrics(HWND hwnd, int *listw, int *propsx, int *bodybot)
+{
+    RECT rc;
+    int extra, lw;
+    GetClientRect(hwnd, &rc);
+    /* 窗口拉宽时把多出来的宽度按 2:3 分给片段列表和属性区：片段列表要看得见
+       摘要，属性区要放得下规则列表，只喂一边都不合适 */
+    extra = (rc.right - rc.left) - DPIX(ED_MIN_W);
+    if (extra < 0) extra = 0;
+    lw = DPIX(332) + extra * 2 / 5;
+    if (listw)   *listw = lw;
+    if (propsx)  *propsx = DPIX(12) + lw + DPIX(12);
+    if (bodybot) *bodybot = ed_splitter_y(rc.bottom - rc.top);
+}
+
+/* 命中判定：预览分隔条横贯整个宽度 */
+static int ed_split_hit(HWND hwnd, int x, int y)
+{
+    RECT rc;
+    int top;
+    GetClientRect(hwnd, &rc);
+    top = ed_splitter_y(rc.bottom - rc.top);
+    return x >= DPIX(12) && x < rc.right - DPIX(12) &&
+           y >= top && y < top + ED_SPLIT_HIT;
+}
 
 static Segment *ed_cur_seg(EditorCtx *c)
 {
@@ -1045,7 +1125,8 @@ static void ed_layout_props(EditorCtx *c)
 {
     Segment *s = ed_cur_seg(c);
     RECT rc;
-    int m = DPIX(12), x = DPIX(356), lw = DPIX(80);
+    HDWP dwp;
+    int m = DPIX(12), x, lw = DPIX(80), bodybot;
     int cx, cw, y = DPIX(68);
     int has = s != NULL;
     int t = has ? (int)s->type : -1;
@@ -1067,27 +1148,37 @@ static void ed_layout_props(EditorCtx *c)
     int right, nblock, blockh;
 
     GetClientRect(c->hwnd, &rc);
+    ed_metrics(c->hwnd, NULL, &x, &bodybot);
     right = rc.right - m;
     cx = x + lw + DPIX(8);
     cw = right - cx;
+    if (cw < DPIX(120)) cw = DPIX(120);
+    dwp = BeginDeferWindowPos(48);
 
 #define ED_ROW(lbl, ctl, show, hgt)                                            \
     do {                                                                       \
         ShowWindow((lbl), (show) ? SW_SHOW : SW_HIDE);                          \
         ShowWindow((ctl), (show) ? SW_SHOW : SW_HIDE);                          \
         if (show) {                                                            \
-            MoveWindow((lbl), x, y + DPIX(4), lw, DPIX(18), TRUE);              \
-            MoveWindow((ctl), cx, y, cw, DPIX(hgt), TRUE);                      \
+            dwp = qp_defer(dwp, (lbl), x, y + DPIX(4), lw, DPIX(18));            \
+            dwp = qp_defer(dwp, (ctl), cx, y, cw, DPIX(hgt));                    \
             y += DPIX(hgt) + DPIX(4);                                          \
         }                                                                      \
     } while (0)
 
     ShowWindow(c->hPropTitle, has ? SW_SHOW : SW_HIDE);
-    MoveWindow(c->hPropTitle, x, DPIX(44), cw + lw, DPIX(18), TRUE);
+    dwp = qp_defer(dwp, c->hPropTitle, x, DPIX(44), cw + lw, DPIX(18));
 
     ED_ROW(c->hTypeLbl, c->hType, has, 24);
     ED_ROW(c->hLabelLbl, c->hLabel, show_label, 24);
     ED_ROW(c->hContentLbl, c->hContent, show_content, 80);
+    /* 占位符用法就一行提示，跟在固定内容下方：固定片段的属性本来就少，这一行
+       不挤占别人的位置，也免得用户去文档里找「怎么在一句话里插变量」 */
+    ShowWindow(c->hHint, show_content ? SW_SHOW : SW_HIDE);
+    if (show_content) {
+        dwp = qp_defer(dwp, c->hHint, cx, y, cw, DPIX(18));
+        y += DPIX(18) + DPIX(4);
+    }
     ED_ROW(c->hPlaceLbl, c->hPlace, show_place, 24);
     ED_ROW(c->hDefLbl, c->hDef, show_def, 24);
     ED_ROW(c->hSepLbl, c->hSep, show_sep, 24);
@@ -1095,19 +1186,19 @@ static void ed_layout_props(EditorCtx *c)
     /* 格式的实时效果：跟在格式框下方，与它左边对齐，改一个字就能看到结果 */
     ShowWindow(c->hFmtSample, show_fmt ? SW_SHOW : SW_HIDE);
     if (show_fmt) {
-        MoveWindow(c->hFmtSample, cx, y, cw, DPIX(18), TRUE);
+        dwp = qp_defer(dwp, c->hFmtSample, cx, y, cw, DPIX(18));
         y += DPIX(18) + DPIX(4);
     }
 
     /* 「隐藏」开关自带文字，不需要左侧标签，与其他控件左对齐即可 */
     ShowWindow(c->hHidden, show_hidden ? SW_SHOW : SW_HIDE);
     if (show_hidden) {
-        MoveWindow(c->hHidden, cx, y, cw, DPIX(22), TRUE);
+        dwp = qp_defer(dwp, c->hHidden, cx, y, cw, DPIX(22));
         y += DPIX(22) + DPIX(6);
     }
     ShowWindow(c->hMultiline, show_multi ? SW_SHOW : SW_HIDE);
     if (show_multi) {
-        MoveWindow(c->hMultiline, cx, y, cw, DPIX(22), TRUE);
+        dwp = qp_defer(dwp, c->hMultiline, cx, y, cw, DPIX(22));
         y += DPIX(22) + DPIX(6);
     }
 
@@ -1120,25 +1211,25 @@ static void ed_layout_props(EditorCtx *c)
     ShowWindow(c->hRefB, show_refparam ? SW_SHOW : SW_HIDE);
     if (show_refmode) {
         int mw = show_refparam ? (cw - DPIX(8)) / 2 : cw;
-        MoveWindow(c->hRefModeLbl, x, y + DPIX(4), lw, DPIX(18), TRUE);
-        MoveWindow(c->hRefMode, cx, y, mw, DPIX(24), TRUE);
+        dwp = qp_defer(dwp, c->hRefModeLbl, x, y + DPIX(4), lw, DPIX(18));
+        dwp = qp_defer(dwp, c->hRefMode, cx, y, mw, DPIX(24));
         if (show_refparam) {
             int px = cx + mw + DPIX(8);
             int pw = (right - px - DPIX(6)) / 2;
-            MoveWindow(c->hRefA, px, y, pw, DPIX(24), TRUE);
-            MoveWindow(c->hRefB, px + pw + DPIX(6), y, right - px - pw - DPIX(6),
-                       DPIX(24), TRUE);
+            dwp = qp_defer(dwp, c->hRefA, px, y, pw, DPIX(24));
+            dwp = qp_defer(dwp, c->hRefB, px + pw + DPIX(6), y,
+                           right - px - pw - DPIX(6), DPIX(24));
         }
         y += DPIX(24) + DPIX(4);
     }
 
-    /* 选项 / 规则区的列表高度：默认 92，属性行多又碰上大缩放比例时按剩余空间
-       等分压缩，保证最后一块不会伸出属性区底部（与左侧片段列表同一条底线） */
+    /* 选项 / 规则区的列表高度：把属性行占完之后剩下的空间按块数等分 —— 窗口拉高
+       就一起长高，属性行多又碰上大缩放比例时一起压缩，最后一块永远不会伸出
+       属性区底部（bodybot 与左侧片段列表同一条底线） */
     nblock = (show_opt ? 1 : 0) + (show_parse ? 1 : 0) + (show_cond ? 1 : 0);
     blockh = DPIX(92);
     if (nblock > 0) {
-        int each = (DPIX(546) - y) / nblock - (DPIX(22) + DPIX(4) + DPIX(8));
-        if (each < blockh) blockh = each;
+        blockh = (bodybot - y) / nblock - (DPIX(22) + DPIX(4) + DPIX(8));
         if (blockh < DPIX(56)) blockh = DPIX(56);
     }
 
@@ -1152,14 +1243,14 @@ static void ed_layout_props(EditorCtx *c)
         ShowWindow((b4), vis); ShowWindow((b5), vis);                           \
         if (show) {                                                            \
             bx = right - (bw * 3 + sw * 2 + DPIX(8));                          \
-            MoveWindow((lbl), x, y + DPIX(3), bx - x - DPIX(4), DPIX(18), TRUE);\
-            MoveWindow((b1), bx, y, bw, bh, TRUE); bx += bw + DPIX(2);          \
-            MoveWindow((b2), bx, y, bw, bh, TRUE); bx += bw + DPIX(2);          \
-            MoveWindow((b3), bx, y, bw, bh, TRUE); bx += bw + DPIX(2);          \
-            MoveWindow((b4), bx, y, sw, bh, TRUE); bx += sw + DPIX(2);          \
-            MoveWindow((b5), bx, y, sw, bh, TRUE);                              \
+            dwp = qp_defer(dwp, (lbl), x, y + DPIX(3), bx - x - DPIX(4), DPIX(18)); \
+            dwp = qp_defer(dwp, (b1), bx, y, bw, bh); bx += bw + DPIX(2);        \
+            dwp = qp_defer(dwp, (b2), bx, y, bw, bh); bx += bw + DPIX(2);        \
+            dwp = qp_defer(dwp, (b3), bx, y, bw, bh); bx += bw + DPIX(2);        \
+            dwp = qp_defer(dwp, (b4), bx, y, sw, bh); bx += sw + DPIX(2);        \
+            dwp = qp_defer(dwp, (b5), bx, y, sw, bh);                           \
             y += bh + DPIX(4);                                                 \
-            MoveWindow((list), x, y, right - x, (listh), TRUE);                 \
+            dwp = qp_defer(dwp, (list), x, y, right - x, (listh));              \
             y += (listh) + DPIX(8);                                            \
         }                                                                      \
     } while (0)
@@ -1173,6 +1264,8 @@ static void ed_layout_props(EditorCtx *c)
 
 #undef ED_ROW
 #undef ED_BLOCK
+
+    if (dwp) EndDeferWindowPos(dwp);
 
     /* 列表列宽随窗口 */
     ListView_SetColumnWidth(c->hOptList, 0, right - x - DPIX(26));
@@ -1693,47 +1786,70 @@ static void ed_cond_move(EditorCtx *c, int delta)
 static void ed_layout(EditorCtx *c)
 {
     RECT rc;
+    HDWP dwp;
     int m = DPIX(12), y, lw = DPIX(66);
-    int listx = DPIX(12), listw = DPIX(332);
-    int bw, bh = DPIX(24);
+    int listx = DPIX(12), listw, bodybot;
+    int bw, bh = DPIX(24), btnH = DPIX(26), btnY, prevH, prevY;
+    int W, H;
 
     GetClientRect(c->hwnd, &rc);
+    W = rc.right - rc.left;
+    H = rc.bottom - rc.top;
+    if (W <= 0 || H <= 0) return;
+    ed_metrics(c->hwnd, &listw, NULL, &bodybot);
+
+    /* 纵向全部由客户区高度反推（以前是写死的 546 / 552 / 570 / 624，所以就算
+       给了可缩放边框，拉大窗口也只会在下方留一片空白） */
+    btnY  = H - m - btnH;
+    prevH = ed_preview_height_for(H);
+    prevY = btnY - DPIX(8) - prevH;
+
+    dwp = BeginDeferWindowPos(16);
 
     /* 第一行：名称 + 分组 */
     y = m;
-    MoveWindow(GetDlgItem(c->hwnd, IDC_ED_NAME + 1000), m, y + DPIX(4), lw, DPIX(18), TRUE);
-    MoveWindow(c->hName, m + lw + DPIX(6), y, DPIX(230), DPIX(24), TRUE);
-    MoveWindow(GetDlgItem(c->hwnd, IDC_ED_GROUP + 1000),
-               m + lw + DPIX(244), y + DPIX(4), DPIX(44), DPIX(18), TRUE);
-    MoveWindow(c->hGroup, m + lw + DPIX(292), y, DPIX(180), DPIX(24), TRUE);
+    dwp = qp_defer(dwp, GetDlgItem(c->hwnd, IDC_ED_NAME + 1000), m, y + DPIX(4), lw, DPIX(18));
+    dwp = qp_defer(dwp, c->hName, m + lw + DPIX(6), y, DPIX(230), DPIX(24));
+    dwp = qp_defer(dwp, GetDlgItem(c->hwnd, IDC_ED_GROUP + 1000),
+                   m + lw + DPIX(244), y + DPIX(4), DPIX(44), DPIX(18));
+    dwp = qp_defer(dwp, c->hGroup, m + lw + DPIX(292), y, DPIX(180), DPIX(24));
 
     /* 左侧：片段列表 */
     y = DPIX(44);
-    MoveWindow(c->hSegLbl, listx, y, listw, DPIX(18), TRUE);
+    dwp = qp_defer(dwp, c->hSegLbl, listx, y, listw, DPIX(18));
     y = DPIX(68);
     bw = (listw - DPIX(12)) / 5;
-    MoveWindow(c->hAddStatic, listx, y, bw, bh, TRUE);
-    MoveWindow(c->hAddText, listx + bw + DPIX(3), y, bw, bh, TRUE);
-    MoveWindow(c->hAddSelect, listx + (bw + DPIX(3)) * 2, y, bw, bh, TRUE);
-    MoveWindow(c->hAddMulti, listx + (bw + DPIX(3)) * 3, y, bw, bh, TRUE);
-    MoveWindow(c->hAddTime, listx + (bw + DPIX(3)) * 4, y, bw, bh, TRUE);
+    dwp = qp_defer(dwp, c->hAddStatic, listx, y, bw, bh);
+    dwp = qp_defer(dwp, c->hAddText, listx + bw + DPIX(3), y, bw, bh);
+    dwp = qp_defer(dwp, c->hAddSelect, listx + (bw + DPIX(3)) * 2, y, bw, bh);
+    dwp = qp_defer(dwp, c->hAddMulti, listx + (bw + DPIX(3)) * 3, y, bw, bh);
+    dwp = qp_defer(dwp, c->hAddTime, listx + (bw + DPIX(3)) * 4, y, bw, bh);
     y += bh + DPIX(4);
-    MoveWindow(c->hSegDel, listx, y, bw, bh, TRUE);
-    MoveWindow(c->hSegUp, listx + bw + DPIX(3), y, DPIX(40), bh, TRUE);
-    MoveWindow(c->hSegDown, listx + bw + DPIX(46), y, DPIX(40), bh, TRUE);
+    dwp = qp_defer(dwp, c->hSegDel, listx, y, bw, bh);
+    dwp = qp_defer(dwp, c->hSegUp, listx + bw + DPIX(3), y, DPIX(40), bh);
+    dwp = qp_defer(dwp, c->hSegDown, listx + bw + DPIX(46), y, DPIX(40), bh);
     y += bh + DPIX(6);
-    MoveWindow(c->hSegList, listx, y, listw, DPIX(546) - y, TRUE);
-    ListView_SetColumnWidth(c->hSegList, 2, listw - DPIX(96) - DPIX(20));
+    dwp = qp_defer(dwp, c->hSegList, listx, y, listw, bodybot - y);
 
     /* 底部：预览 + 按钮 */
-    MoveWindow(c->hPreviewLbl, m, DPIX(552), rc.right - m * 2, DPIX(16), TRUE);
-    MoveWindow(c->hPreview, m, DPIX(570), rc.right - m * 2, DPIX(46), TRUE);
-    MoveWindow(GetDlgItem(c->hwnd, IDOK), rc.right - m - DPIX(196),
-               DPIX(624), DPIX(92), DPIX(26), TRUE);
-    MoveWindow(GetDlgItem(c->hwnd, IDCANCEL), rc.right - m - DPIX(98),
-               DPIX(624), DPIX(92), DPIX(26), TRUE);
+    dwp = qp_defer(dwp, c->hPreviewLbl, m, prevY - DPIX(18), W - m * 2, DPIX(16));
+    dwp = qp_defer(dwp, c->hPreview, m, prevY, W - m * 2, prevH);
+    dwp = qp_defer(dwp, GetDlgItem(c->hwnd, IDOK), W - m - DPIX(196),
+                   btnY, DPIX(92), btnH);
+    dwp = qp_defer(dwp, GetDlgItem(c->hwnd, IDCANCEL), W - m - DPIX(98),
+                   btnY, DPIX(92), btnH);
+    if (dwp) EndDeferWindowPos(dwp);
+
+    ListView_SetColumnWidth(c->hSegList, 2, listw - DPIX(96) - DPIX(20));
 
     ed_layout_props(c);
+
+    /* 分隔条挪过位置 → 连同上面让出来的空档攒成一次 WM_PAINT 立刻画完，
+       与主窗口同一做法（见 ui.c 的 ui_layout 尾部注释） */
+    if (c->splitLastY != prevY) {
+        c->splitLastY = prevY;
+        RedrawWindow(c->hwnd, NULL, NULL, RDW_INVALIDATE | RDW_NOERASE | RDW_UPDATENOW);
+    }
 }
 
 static void ed_fill_groups(EditorCtx *c)
@@ -1749,6 +1865,60 @@ static void ed_fill_groups(EditorCtx *c)
         if (wcscmp(c->t->group_id, g->id) == 0) sel = i;
     }
     SendMessageW(c->hGroup, CB_SETCURSEL, (WPARAM)sel, 0);
+}
+
+/*
+ * 保存前的体检：把「配好了但永远不会生效」的规则摆出来。
+ * 只提醒不拦人 —— 判定再保守也可能有我想不到的用法，最终由你说了算。
+ * 返回 1 = 继续保存，0 = 回去修改（顺手把光标停在第一条问题那一段上）。
+ */
+#define ED_LINT_SHOW 6              /* 一次最多列这么多条，再多也看不下去 */
+
+static int ed_check_lint(HWND hwnd, EditorCtx *c)
+{
+    LintIssue *issues;
+    wchar_t *msg;
+    size_t cap, used;
+    int n, i, shown, ret;
+
+    issues = (LintIssue *)calloc(QP_LINT_MAX, sizeof(LintIssue));
+    if (!issues) return 1;          /* 内存都没了，别为了体检挡住保存 */
+    n = tmpl_lint(c->t, issues, QP_LINT_MAX);
+    if (n <= 0) { free(issues); return 1; }
+
+    cap = (size_t)(ED_LINT_SHOW + 2) * QP_RESULT_MAX;
+    msg = (wchar_t *)calloc(cap, sizeof(wchar_t));
+    if (!msg) { free(issues); return 1; }
+
+    qp_strlcpy(msg, L"这几处看起来不会生效：\n\n", cap);
+    used = wcslen(msg);
+    shown = (n < ED_LINT_SHOW) ? n : ED_LINT_SHOW;
+    for (i = 0; i < shown; ++i) {
+        _snwprintf(msg + used, cap - used, L"· %ls\n", issues[i].text);
+        msg[cap - 1] = L'\0';
+        used += wcslen(msg + used);
+    }
+    if (n > shown) {
+        _snwprintf(msg + used, cap - used, L"…另外还有 %d 条同类问题。\n", n - shown);
+        msg[cap - 1] = L'\0';
+        used += wcslen(msg + used);
+    }
+    qp_strlcpy(msg + used, L"\n仍然保存吗？选「否」回去修改。", cap - used);
+
+    ret = MessageBoxW(hwnd, msg, L"模板体检",
+                      MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2);
+    if (ret != IDYES) {
+        /* 停到第一条问题所在的片段：省得自己数「第 7 段」是哪一段 */
+        int at = issues[0].seg_index;
+        if (at >= 0 && at < seg_list_count(c->t->segments)) {
+            c->cur = at;
+            ed_fill_seglist(c, at);
+            ed_load_props(c);
+        }
+    }
+    free(msg);
+    free(issues);
+    return ret == IDYES;
 }
 
 static LRESULT CALLBACK editor_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
@@ -1804,6 +1974,9 @@ static LRESULT CALLBACK editor_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         c->hContentLbl = mk_label_r(hwnd, L"固定内容：", 0);
         c->hContent = mk_edit(hwnd, IDC_ED_SEG_CONTENT,
                               ES_MULTILINE | ES_WANTRETURN | ES_AUTOVSCROLL | WS_VSCROLL);
+        c->hHint = mk_label(hwnd,
+                            L"可以写 {变量名} 直接引用其他变量的值；{{ 输出一个 {",
+                            IDC_ED_SEG_HINT);
         c->hPlaceLbl = mk_label_r(hwnd, L"占位提示：", 0);
         c->hPlace = mk_edit(hwnd, IDC_ED_SEG_PLACE, 0);
         c->hDefLbl = mk_label_r(hwnd, L"默认值：", 0);
@@ -1881,9 +2054,157 @@ static LRESULT CALLBACK editor_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         return 0;
     }
 
-    case WM_SIZE:
-        if (c) ed_layout(c);
+    case WM_GETMINMAXINFO: {
+        /* 最小尺寸就是原来写死的那套设计尺寸：再小属性区放不下三个规则列表 */
+        MINMAXINFO *mmi = (MINMAXINFO *)lp;
+        RECT rc;
+        rc.left = 0; rc.top = 0;
+        rc.right = DPIX(ED_MIN_W);
+        rc.bottom = DPIX(ED_MIN_H);
+        AdjustWindowRectEx(&rc, (DWORD)GetWindowLongPtrW(hwnd, GWL_STYLE), FALSE,
+                           (DWORD)GetWindowLongPtrW(hwnd, GWL_EXSTYLE));
+        mmi->ptMinTrackSize.x = rc.right - rc.left;
+        mmi->ptMinTrackSize.y = rc.bottom - rc.top;
         return 0;
+    }
+
+    case WM_SIZE:
+        if (c) {
+            if (wp == SIZE_RESTORED) {
+                RECT rc;
+                GetClientRect(hwnd, &rc);
+                /* 记住客户区尺寸，与主窗口的 win_w/win_h 同一口径（绝对像素、
+                   不做 DPI 折算）。最大化时不记，否则下次还原成一扇大窗。 */
+                g_settings.editor_w = rc.right - rc.left;
+                g_settings.editor_h = rc.bottom - rc.top;
+            }
+            ed_layout(c);
+        }
+        return 0;
+
+    /* 拖完边框才落盘一次：拖动途中每格都写一次文件没有意义 */
+    case WM_EXITSIZEMOVE:
+        if (c) app_save_settings();
+        return 0;
+
+    case WM_ERASEBKGND:
+        /* 什么都不做，只声称「已经擦过了」：背景连同分隔条由 WM_PAINT 在离屏
+           位图上一趟画完（与主窗口同一做法，见 ui.c）。这里再涂一遍会让分隔条
+           先消失一帧，拖动时就是闪。必须挡在 dlg_common 之前。 */
+        return 1;
+
+    case WM_PAINT: {
+        PAINTSTRUCT ps;
+        HDC hdc = BeginPaint(hwnd, &ps);
+        if (hdc) {
+            RECT rc, bar, clip = ps.rcPaint;
+            HDC dc = hdc, mem = NULL;
+            HBITMAP bmp = NULL, oldBmp = NULL;
+            HBRUSH b;
+            int cw = clip.right - clip.left, ch = clip.bottom - clip.top;
+            int one = DPIX(1) > 1 ? DPIX(1) : 1;
+            GetClientRect(hwnd, &rc);
+            if (cw > 0 && ch > 0 && (mem = CreateCompatibleDC(hdc)) != NULL) {
+                bmp = CreateCompatibleBitmap(hdc, cw, ch);
+                if (bmp) {
+                    oldBmp = (HBITMAP)SelectObject(mem, bmp);
+                    /* 原点对到客户区坐标，下面的计算不用改 */
+                    SetViewportOrgEx(mem, -clip.left, -clip.top, NULL);
+                    dc = mem;
+                } else {
+                    DeleteDC(mem);
+                    mem = NULL;
+                }
+            }
+            FillRect(dc, &clip, g_brushBk);
+            /* 画出预览分隔条本体，让人看得见哪里可以拖 */
+            b = CreateSolidBrush(theme_line());
+            if (b) {
+                bar.left   = DPIX(12);
+                bar.right  = rc.right - DPIX(12);
+                bar.top    = ed_splitter_y(rc.bottom - rc.top) + ED_SPLIT_HIT / 2;
+                bar.bottom = bar.top + one;
+                if (bar.right > bar.left) FillRect(dc, &bar, b);
+                DeleteObject(b);
+            }
+            if (mem) {
+                SetViewportOrgEx(mem, 0, 0, NULL);
+                BitBlt(hdc, clip.left, clip.top, cw, ch, mem, 0, 0, SRCCOPY);
+                SelectObject(mem, oldBmp);
+                DeleteObject(bmp);
+                DeleteDC(mem);
+            }
+        }
+        EndPaint(hwnd, &ps);
+        return 0;
+    }
+
+    case WM_SETCURSOR: {
+        POINT pt;
+        GetCursorPos(&pt);
+        ScreenToClient(hwnd, &pt);
+        if (ed_split_hit(hwnd, pt.x, pt.y)) {
+            SetCursor(LoadCursorW(NULL, IDC_SIZENS));
+            return TRUE;
+        }
+        break;
+    }
+
+    case WM_LBUTTONDOWN: {
+        int x = (short)LOWORD(lp), y = (short)HIWORD(lp);
+        RECT rc;
+        if (!c) break;
+        GetClientRect(hwnd, &rc);
+        if (ed_split_hit(hwnd, x, y)) {
+            c->splitDrag = 1;
+            /* 记住抓取偏移，分隔条不会跳到光标下 */
+            c->splitGrabDy = y - ed_splitter_y(rc.bottom - rc.top);
+            SetCapture(hwnd);
+        }
+        return 0;
+    }
+
+    /* 双击分隔条恢复默认高度：与主窗口那两条分隔条的交互保持一致 */
+    case WM_LBUTTONDBLCLK:
+        if (c && ed_split_hit(hwnd, (short)LOWORD(lp), (short)HIWORD(lp))) {
+            g_settings.editor_preview_height = 0;
+            ed_layout(c);
+            app_save_settings();
+            return 0;
+        }
+        break;
+
+    case WM_MOUSEMOVE:
+        if (c && c->splitDrag) {
+            RECT rc;
+            int y = (short)HIWORD(lp);
+            int H, lo, hi, h;
+            GetClientRect(hwnd, &rc);
+            H = rc.bottom - rc.top;
+            ed_preview_bounds(H, &lo, &hi);
+            /* 往上拖 = 预览变高；公式与 ed_splitter_y 互为反函数 */
+            h = H - DPIX(12) - DPIX(26) - DPIX(8) - DPIX(18) - ED_SPLIT_HIT
+                  - (y - c->splitGrabDy);
+            if (h < lo) h = lo;
+            if (h > hi) h = hi;
+            if (h != g_settings.editor_preview_height) {
+                g_settings.editor_preview_height = h;
+                ed_layout(c);
+            }
+        }
+        return 0;
+
+    case WM_LBUTTONUP:
+        if (c && c->splitDrag) {
+            c->splitDrag = 0;
+            ReleaseCapture();
+            app_save_settings();
+        }
+        return 0;
+
+    case WM_CANCELMODE:
+        if (c) c->splitDrag = 0;
+        break;
 
     case WM_COMMAND: {
         WORD id = LOWORD(wp), code = HIWORD(wp);
@@ -1995,6 +2316,8 @@ static LRESULT CALLBACK editor_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                      !tmpl_find_segment(c->t, a->ref_segment_id)))
                     a->ref_segment_id[0] = L'\0';
             }
+            /* 体检：能证明不会生效的规则，保存前提一句（不拦人） */
+            if (!ed_check_lint(hwnd, c)) return 0;
             qp_strlcpy(c->t->name, name, QP_NAME_MAX);
             gi = (int)SendMessageW(c->hGroup, CB_GETCURSEL, 0, 0);
             g = (gi > 0) ? (Group *)SendMessageW(c->hGroup, CB_GETITEMDATA, (WPARAM)gi, 0)
@@ -2058,6 +2381,32 @@ static LRESULT CALLBACK editor_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     return DefWindowProcW(hwnd, msg, wp, lp);
 }
 
+/* 还原上次记住的编辑器尺寸：存的是客户区绝对像素，这里夹进屏幕工作区 */
+static void ed_restore_size(HWND hwnd, HWND owner)
+{
+    RECT rc, wa;
+    DWORD style, ex;
+    int w = g_settings.editor_w, h = g_settings.editor_h;
+    if (!hwnd || w <= 0 || h <= 0) return;
+    if (w < DPIX(ED_MIN_W)) w = DPIX(ED_MIN_W);
+    if (h < DPIX(ED_MIN_H)) h = DPIX(ED_MIN_H);
+    style = (DWORD)GetWindowLongPtrW(hwnd, GWL_STYLE);
+    ex = (DWORD)GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+    rc.left = 0; rc.top = 0; rc.right = w; rc.bottom = h;
+    AdjustWindowRectEx(&rc, style, FALSE, ex);
+    if (!SystemParametersInfoW(SPI_GETWORKAREA, 0, &wa, 0)) {
+        wa.left = 0; wa.top = 0;
+        wa.right = GetSystemMetrics(SM_CXSCREEN);
+        wa.bottom = GetSystemMetrics(SM_CYSCREEN);
+    }
+    w = rc.right - rc.left;
+    h = rc.bottom - rc.top;
+    if (w > wa.right - wa.left) w = wa.right - wa.left;
+    if (h > wa.bottom - wa.top) h = wa.bottom - wa.top;
+    SetWindowPos(hwnd, NULL, 0, 0, w, h, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+    qp_center_window(hwnd, owner);
+}
+
 int dlg_edit_template(HWND owner, Template *working, int is_new)
 {
     EditorCtx c;
@@ -2066,8 +2415,12 @@ int dlg_edit_template(HWND owner, Template *working, int is_new)
     c.t = working;
     c.is_new = is_new;
     c.cur = -1;
-    dlg = make_dlg(L"QuickPhraseEditor", editor_proc,
-                   is_new ? L"新建模板" : L"编辑模板", 880, 662, owner, &c);
+    c.splitLastY = -1;                /* 还没画过分隔条 */
+    dlg = make_dlg_ex(L"QuickPhraseEditor", editor_proc,
+                      is_new ? L"新建模板" : L"编辑模板",
+                      ED_MIN_W, ED_MIN_H, owner, &c,
+                      WS_THICKFRAME | WS_MAXIMIZEBOX);
+    ed_restore_size(dlg, owner);
     return run_modal(owner, dlg, &c.result);
 }
 

@@ -41,6 +41,9 @@ void dlg_about(HWND owner);
 /* --------------------- 公共小工具（ui.c 实现） -------------------- */
 HWND qp_create(const wchar_t *cls, const wchar_t *text, DWORD style, DWORD ex,
                int x, int y, int w, int h, HWND parent, int id);
+/* 批量摆位：把一批位置变化攒成一次 EndDeferWindowPos 提交。位置没变的控件直接
+   跳过；尺寸没变、只是挪位置的让系统搬像素而不重绘（否则标签会「闪一下」）。 */
+HDWP qp_defer(HDWP dwp, HWND h, int x, int y, int w, int ht);
 void qp_get_text(HWND h, wchar_t *buf, size_t cap);
 void qp_set_text_if_diff(HWND h, const wchar_t *text);
 int  qp_msgbox(HWND owner, UINT type, const wchar_t *title, const wchar_t *fmt, ...);

@@ -144,6 +144,111 @@ int qp_split_take(const wchar_t *src, const wchar_t *delim, int index,
     return 0;
 }
 
+/* --------------------------- 占位符 ------------------------------- */
+/*
+ * 固定片段的内容里可以写 {变量名}，生成时换成那个变量此刻的值。这样「一句话里
+ * 夹一个变量」不用再拆成「文本 - 变量 - 文本」三段，也就不必为了拼接而造一堆
+ * 只为引用而存在的隐藏变量。
+ *
+ * 约定就三条：
+ *   {{           输出一个字面的 {
+ *   {没有的名字}  原样保留 —— 预览里一眼看得见写错了，不会悄悄变成空
+ *   换进来的内容里若还有 {…}，不再展开（只替换一层，免得互相套成死循环）
+ * 名字按「id 优先、其次变量名（不分大小写）」找，与规则里指目标同一口径。
+ */
+
+/* 找出 src 从 pos 起的下一个占位符：*start / *end 为 { 与 } 的下标，name 为中间
+   那段（已去掉首尾空白）。{{ 不算占位符（转义留给调用方折叠）。名字里出现
+   换行、又一个 {、或长过变量名上限，都当它不是占位符 —— 少了个 } 时不至于把
+   后面一整段正文都吞进去。 */
+static int placeholder_next(const wchar_t *src, size_t pos,
+                            size_t *start, size_t *end,
+                            wchar_t *name, size_t cap)
+{
+    size_t i, j, n;
+    if (!src || !name || cap == 0) return 0;
+    for (i = pos; src[i]; ++i) {
+        if (src[i] != L'{') continue;
+        if (src[i + 1] == L'{') { ++i; continue; }
+        for (j = i + 1; src[j]; ++j) {
+            if (src[j] == L'}' || src[j] == L'{' ||
+                src[j] == L'\r' || src[j] == L'\n') break;
+            if (j - i > QP_LABEL_MAX) break;
+        }
+        if (src[j] != L'}') continue;
+        n = j - i - 1;
+        if (n == 0 || n >= cap) continue;
+        memcpy(name, src + i + 1, n * sizeof(wchar_t));
+        name[n] = L'\0';
+        qp_trim(name);
+        if (!name[0]) continue;                     /* {   } 只有空白，不算 */
+        if (start) *start = i;
+        if (end) *end = j;
+        return 1;
+    }
+    return 0;
+}
+
+/* 往 out 尾部追加 n 个字符，装不下就截断（结尾 0 始终留位） */
+static size_t append_n(wchar_t *out, size_t cap, size_t used,
+                       const wchar_t *src, size_t n)
+{
+    if (used + 1 >= cap) return used;
+    if (n > cap - used - 1) n = cap - used - 1;
+    memcpy(out + used, src, n * sizeof(wchar_t));
+    used += n;
+    out[used] = L'\0';
+    return used;
+}
+
+/* 追加一段普通文本，途中把 {{ 折成一个 { */
+static size_t append_unescaped(wchar_t *out, size_t cap, size_t used,
+                               const wchar_t *src, size_t n)
+{
+    size_t i;
+    for (i = 0; i < n; ++i) {
+        if (src[i] == L'{' && i + 1 < n && src[i + 1] == L'{') ++i;
+        used = append_n(out, cap, used, src + i, 1);
+    }
+    return used;
+}
+
+size_t qp_expand_placeholders(const wchar_t *src, QpPlaceholderLookup lookup,
+                              void *user, wchar_t *out, size_t cap)
+{
+    size_t used = 0, pos = 0, s = 0, e = 0;
+    wchar_t name[QP_LABEL_MAX];
+    if (!out || cap == 0) return 0;
+    out[0] = L'\0';
+    if (!src) return 0;
+    while (placeholder_next(src, pos, &s, &e, name, QP_LABEL_MAX)) {
+        const wchar_t *v = lookup ? lookup(user, name) : NULL;
+        used = append_unescaped(out, cap, used, src + pos, s - pos);
+        if (v) used = append_n(out, cap, used, v, wcslen(v));
+        else   used = append_n(out, cap, used, src + s, e - s + 1);
+        pos = e + 1;
+    }
+    used = append_unescaped(out, cap, used, src + pos, wcslen(src + pos));
+    return used;
+}
+
+int qp_placeholder_at(const wchar_t *src, int index, wchar_t *name, size_t cap)
+{
+    wchar_t buf[QP_LABEL_MAX];
+    size_t pos = 0, s = 0, e = 0;
+    int n = 0;
+    if (name && cap) name[0] = L'\0';
+    while (placeholder_next(src, pos, &s, &e, buf, QP_LABEL_MAX)) {
+        if (n == index) {
+            if (name) qp_strlcpy(name, buf, cap);
+            return 1;
+        }
+        ++n;
+        pos = e + 1;
+    }
+    return 0;
+}
+
 void qp_new_id(wchar_t *out, size_t cap, const wchar_t *prefix)
 {
     static unsigned long counter = 0;
@@ -1343,6 +1448,24 @@ static int cond_rule_hit(const EvalContext *ctx, const ConditionRule *r,
     return r->join == COND_JOIN_ANY ? 0 : 1;
 }
 
+/* 占位符取值：本轮的工作值，名字按「id 优先、其次变量名」找（与规则同一口径）。
+   指向自己（固定片段用自己的 id 当占位符名）算认不出，免得自我展开。 */
+typedef struct {
+    const EvalContext *ctx;
+    wchar_t (*work)[QP_VALUE_MAX];
+    int self;
+} PlaceholderCtx;
+
+static const wchar_t *eval_placeholder_lookup(void *user, const wchar_t *name)
+{
+    const PlaceholderCtx *p = (const PlaceholderCtx *)user;
+    int at;
+    if (!p) return NULL;
+    at = eval_index_of_id(p->ctx, name);
+    if (at < 0 || at == p->self) return NULL;
+    return p->work[at];
+}
+
 void eval_run(EvalContext *ctx)
 {
     wchar_t (*work)[QP_VALUE_MAX];
@@ -1473,6 +1596,21 @@ void eval_run(EvalContext *ctx)
                 qp_strlcpy(next, f->user_value, QP_VALUE_MAX);
             } else {
                 qp_strlcpy(next, field_fallback_of(f), QP_VALUE_MAX);
+            }
+            /* 固定片段里的 {变量名} 换成那个变量此刻的值。放在这里而不是渲染时，
+               是为了让它跟着不动点一起收敛：被引用的变量本轮才刚被规则推出值，
+               下一轮这里就取得到了。每轮都是从模板原文重新展开一次，所以不会
+               越展开越长。只有固定片段做替换 —— 用户自己敲进文本框的 { 永远
+               是字面量，不会被当成占位符解释。 */
+            if (f->seg && f->seg->type == SEG_STATIC && wcschr(next, L'{')) {
+                wchar_t expanded[QP_VALUE_MAX];
+                PlaceholderCtx pc;
+                pc.ctx = ctx;
+                pc.work = work;
+                pc.self = i;
+                qp_expand_placeholders(next, eval_placeholder_lookup, &pc,
+                                       expanded, QP_VALUE_MAX);
+                qp_strlcpy(next, expanded, QP_VALUE_MAX);
             }
             if (wcscmp(next, work[i]) != 0) {
                 qp_strlcpy(work[i], next, QP_VALUE_MAX);
@@ -1675,6 +1813,242 @@ void cond_rule_summary(const ConditionRule *r, const Template *t, wchar_t *out, 
         swprintf(tail, sizeof(tail) / sizeof(tail[0]), L" → 内容 = 「%ls」", r->result_value);
         qp_strlcpy(out + used, tail, cap - used);
     }
+}
+
+/* ================================================================== */
+/* 模板体检                                                            */
+/* ================================================================== */
+/*
+ * 保存模板时跑一遍，把「配好了、但永远不会生效」的规则挑出来。规则一多就没人
+ * 能在脑子里把它们全跑一遍，写错了的表现又只是「少了一段」，很难往回找。
+ *
+ * 只报能证明的：判定用的是引擎自己的 cond_term_hit()，取值清单也只在真的能
+ * 穷举时才算。穷举不了就闭嘴 —— 宁可漏报，不能冤枉一条好规则。
+ */
+
+/* 往取值清单里加一条，重复的不加；满了返回 0（调用方据此放弃穷举） */
+static int lint_vals_add(const wchar_t **vals, int *n, int cap, const wchar_t *v)
+{
+    int i;
+    if (!v) v = L"";
+    for (i = 0; i < *n; ++i)
+        if (wcscmp(vals[i], v) == 0) return 1;
+    if (*n >= cap) return 0;
+    vals[(*n)++] = v;
+    return 1;
+}
+
+/*
+ * 这个变量的取值能不能穷举？能就把清单写进 vals（指向模板里的原串，不拷贝），
+ * 返回条数；穷举不了返回 -1。
+ *
+ * 穷举不了的情形一律不猜：引用来的、被别人的解析规则填的、能手打的、多选的
+ * 组合、时间串、内容里带占位符的固定片段。
+ * 能穷举时，清单里除了它自己的选项/默认值，还必须算上：
+ *   - 空串（一条规则都没命中、也没填过时它就是空）
+ *   - 它自己每条条件规则的结果值（隐藏变量常常正是靠这个拿到值的）
+ */
+#define LINT_VALS_MAX 24
+
+static int lint_value_set(const Template *t, const Segment *s,
+                          const wchar_t **vals, int cap)
+{
+    const Segment *o;
+    const ConditionRule *r;
+    int n = 0, i;
+
+    if (!t || !s || !vals || cap <= 0) return -1;
+    if (s->ref_segment_id[0]) return -1;
+    for (o = t->segments; o; o = o->next) {
+        const ParseRule *p;
+        for (p = o->parse_rules; p; p = p->next)
+            if (tmpl_find_segment(t, p->target_segment_id) == s) return -1;
+    }
+
+    switch (s->type) {
+    case SEG_STATIC:
+        if (wcschr(s->content, L'{')) return -1;   /* 占位符 → 是别人的值 */
+        if (!lint_vals_add(vals, &n, cap, s->content)) return -1;
+        break;
+    case SEG_SELECT:
+        for (i = 0; i < s->option_count; ++i)
+            if (!lint_vals_add(vals, &n, cap,
+                               s->options && s->options[i] ? s->options[i] : L""))
+                return -1;
+        if (!lint_vals_add(vals, &n, cap, s->default_value)) return -1;
+        break;
+    case SEG_TEXT:
+        if (!s->hidden) return -1;                 /* 能手打 → 什么都可能 */
+        if (!lint_vals_add(vals, &n, cap, s->default_value)) return -1;
+        break;
+    default:
+        return -1;                                 /* 多选的组合、时间串 */
+    }
+    if (!lint_vals_add(vals, &n, cap, L"")) return -1;
+    for (r = s->condition_rules; r; r = r->next)
+        if (!lint_vals_add(vals, &n, cap, r->result_value)) return -1;
+    return n;
+}
+
+/* 把取值清单写成人话：「计算服务器 / 存储服务器 / 空」，长了就省略 */
+static void lint_vals_text(const wchar_t **vals, int n, wchar_t *out, size_t cap)
+{
+    size_t used = 0;
+    int i;
+    if (!out || cap == 0) return;
+    out[0] = L'\0';
+    for (i = 0; i < n; ++i) {
+        const wchar_t *v = (vals[i] && vals[i][0]) ? vals[i] : L"空";
+        if (used + wcslen(v) + 8 >= cap) {
+            qp_strlcpy(out + used, L" …", cap - used);
+            return;
+        }
+        if (used) {
+            qp_strlcpy(out + used, L" / ", cap - used);
+            used += wcslen(out + used);
+        }
+        qp_strlcpy(out + used, v, cap - used);
+        used += wcslen(out + used);
+    }
+}
+
+static void lint_add(LintIssue *out, int *n, LintKind kind,
+                     int seg_index, int rule_index, const wchar_t *text)
+{
+    LintIssue *it = &out[*n];
+    it->kind = kind;
+    it->seg_index = seg_index;
+    it->rule_index = rule_index;
+    qp_strlcpy(it->text, text, QP_RESULT_MAX);
+    ++(*n);
+}
+
+int tmpl_lint(const Template *t, LintIssue *out, int cap)
+{
+    const Segment *s;
+    int n = 0, si = 0;
+
+    if (!t || !out || cap <= 0) return 0;
+
+    for (s = t->segments; s && n < cap; s = s->next, ++si) {
+        const ConditionRule *r;
+        const ParseRule *p;
+        wchar_t msg[QP_RESULT_MAX];
+        const wchar_t *name = seg_display_name(s);
+        int ri, k;
+
+        /* 固定内容里的占位符名字认不出来 → 生成时会把 {名字} 原样打出去 */
+        if (s->type == SEG_STATIC) {
+            wchar_t ph[QP_LABEL_MAX];
+            for (k = 0; n < cap &&
+                        qp_placeholder_at(s->content, k, ph, QP_LABEL_MAX); ++k) {
+                if (tmpl_find_segment(t, ph)) continue;
+                swprintf(msg, QP_RESULT_MAX,
+                         L"第 %d 段（%ls）：占位符「{%ls}」找不到对应的变量，"
+                         L"生成时会原样输出这几个字。", si + 1, name, ph);
+                lint_add(out, &n, LINT_PLACEHOLDER, si, -1, msg);
+            }
+        }
+
+        /* 解析规则的目标变量已被删除 */
+        ri = 0;
+        for (p = s->parse_rules; p && n < cap; p = p->next, ++ri) {
+            if (tmpl_find_segment(t, p->target_segment_id)) continue;
+            swprintf(msg, QP_RESULT_MAX,
+                     L"第 %d 段（%ls）第 %d 条解析规则：目标变量已被删除，"
+                     L"这条规则不会生效。", si + 1, name, ri + 1);
+            lint_add(out, &n, LINT_PARSE_DANGLING, si, ri, msg);
+        }
+
+        ri = 0;
+        for (r = s->condition_rules; r && n < cap; r = r->next, ++ri) {
+            const CondTerm *term;
+            int ti = 0;
+
+            if (!r->terms) {
+                swprintf(msg, QP_RESULT_MAX,
+                         L"第 %d 段（%ls）第 %d 条条件规则一个条件都没有，"
+                         L"永远不会命中。", si + 1, name, ri + 1);
+                lint_add(out, &n, LINT_COND_NOTERM, si, ri, msg);
+                continue;
+            }
+            if (!r->result_value[0] && n < cap) {
+                swprintf(msg, QP_RESULT_MAX,
+                         L"第 %d 段（%ls）第 %d 条条件规则命中后会把这一段变成空，"
+                         L"确认是有意的吗？", si + 1, name, ri + 1);
+                lint_add(out, &n, LINT_COND_EMPTY, si, ri, msg);
+            }
+
+            /*
+             * 逐个条件项看。能证明「永远不成立」的记下来，但规则整体死不死要看
+             * 组合方式：全部满足时一项死就够了，任意满足时得全都死。所以这里
+             * 只攒证据，出不出这一条留到循环之后判 —— 一条规则最多报一句。
+             */
+            {
+                int total = 0, never = 0;
+                wchar_t dead[QP_RESULT_MAX];
+                dead[0] = L'\0';
+
+                for (term = r->terms; term && n < cap; term = term->next, ++ti) {
+                    const Segment *trig = tmpl_find_segment(t, term->trigger_segment_id);
+                    const wchar_t *vals[LINT_VALS_MAX];
+                    wchar_t one[QP_MATCH_MAX + QP_LABEL_MAX + 32];
+                    wchar_t list[256];
+                    int nv, j, hit = 0;
+
+                    ++total;
+                    if (!trig) {
+                        swprintf(msg, QP_RESULT_MAX,
+                                 L"第 %d 段（%ls）第 %d 条条件规则的第 %d 个条件："
+                                 L"所指的变量%ls，这个条件永远不成立。",
+                                 si + 1, name, ri + 1, ti + 1,
+                                 term->trigger_segment_id[0] ? L"已被删除" : L"还没选");
+                        lint_add(out, &n, LINT_COND_DANGLING, si, ri, msg);
+                        ++never;      /* 引擎里悬空项一律不成立，算进证据 */
+                        continue;
+                    }
+                    /* 取反的条件、「为空」这种不带值的，不做穷举判断：前者一穷举
+                       就容易反过来冤枉人，后者的取值清单里永远有空串，本来也报不出。 */
+                    if (term->negate || !cond_op_needs_value(term->op)) continue;
+
+                    nv = lint_value_set(t, trig, vals, LINT_VALS_MAX);
+                    if (nv <= 0) continue;
+                    for (j = 0; j < nv && !hit; ++j)
+                        hit = cond_term_hit(term, vals[j]);
+                    if (hit) continue;
+
+                    ++never;
+                    if (!dead[0]) {   /* 只留第一条，说明里举一个例子就够 */
+                        cond_term_summary(term, t, one, sizeof(one) / sizeof(one[0]));
+                        lint_vals_text(vals, nv, list, sizeof(list) / sizeof(list[0]));
+                        swprintf(dead, QP_RESULT_MAX,
+                                 L"条件「%ls」永远不成立（%ls 只可能是：%ls）",
+                                 one, seg_display_name(trig), list);
+                    }
+                }
+
+                if (dead[0] && n < cap) {
+                    if (r->join != COND_JOIN_ANY)
+                        swprintf(msg, QP_RESULT_MAX,
+                                 L"第 %d 段（%ls）第 %d 条条件规则：%ls，"
+                                 L"要求全部满足，这条规则不会生效。",
+                                 si + 1, name, ri + 1, dead);
+                    else if (never >= total)
+                        swprintf(msg, QP_RESULT_MAX,
+                                 L"第 %d 段（%ls）第 %d 条条件规则：每个条件都永远"
+                                 L"不成立（例如%ls），这条规则不会生效。",
+                                 si + 1, name, ri + 1, dead);
+                    else
+                        swprintf(msg, QP_RESULT_MAX,
+                                 L"第 %d 段（%ls）第 %d 条条件规则：%ls，"
+                                 L"任意满足即可，所以规则还能命中，但这一项白写了。",
+                                 si + 1, name, ri + 1, dead);
+                    lint_add(out, &n, LINT_COND_NEVER, si, ri, msg);
+                }
+            }
+        }
+    }
+    return n;
 }
 
 /* ================================================================== */

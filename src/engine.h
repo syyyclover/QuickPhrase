@@ -180,6 +180,8 @@ typedef struct Settings {
     int      win_maximized;
     int      tree_width;                  /* 左侧模板树宽度            */
     int      preview_height;              /* 口径预览区高度；0 = 自动  */
+    int      editor_w, editor_h;          /* 模板编辑器客户区尺寸；0 = 默认 */
+    int      editor_preview_height;       /* 编辑器里默认值预览的高度；0 = 默认 */
     int      minimize_to_tray_hint;       /* 是否已提示过「已最小化到托盘」*/
     wchar_t  data_dir[QP_PATH_MAX];       /* 自定义数据目录；空 = 默认 %APPDATA%\QuickPhrase */
 } Settings;
@@ -223,6 +225,16 @@ int      qp_is_blank(const wchar_t *s);
 /* 按 delimiter 切割 src，取第 index 段（1 起）。成功返回 1 */
 int      qp_split_take(const wchar_t *src, const wchar_t *delim, int index,
                        wchar_t *out, size_t cap);
+/* --------------------------- 占位符 --------------------------------
+   固定片段的内容里可以写 {变量名}，生成时换成那个变量此刻的值。
+   {{ 输出一个字面的 {；认不出的名字原样保留（写错了要看得见）；换进来的
+   内容里若还有 {…} 不再展开（只替换一层）。详见 engine.c 里的说明。      */
+/* 取值回调：认不出这个名字就返回 NULL */
+typedef const wchar_t *(*QpPlaceholderLookup)(void *user, const wchar_t *name);
+size_t   qp_expand_placeholders(const wchar_t *src, QpPlaceholderLookup lookup,
+                                void *user, wchar_t *out, size_t cap);
+/* 依次取出 src 里第 index 个占位符的名字（0 起），没有了返回 0。体检用 */
+int      qp_placeholder_at(const wchar_t *src, int index, wchar_t *name, size_t cap);
 /* 生成唯一 id（prefix + 计数 + 时间） */
 void     qp_new_id(wchar_t *out, size_t cap, const wchar_t *prefix);
 /* 生成 ISO 时间戳 */
@@ -356,6 +368,31 @@ void cond_rule_summary(const ConditionRule *r, const Template *t, wchar_t *out, 
 void cond_term_summary(const CondTerm *term, const Template *t, wchar_t *out, size_t cap);
 /* 按 id 找片段（用于把 id 显示成变量名） */
 const Segment *tmpl_find_segment(const Template *t, const wchar_t *id);
+
+/* --------------------------- 模板体检 ------------------------------
+   保存模板时跑一遍，挑出「配好了但永远不会生效」的规则。只报能证明的：
+   条件是否成立由引擎自己的判定函数说话，触发变量的取值穷举不了就不报，
+   宁可漏报也不冤枉一条好规则。不阻止保存，只提醒。                     */
+#define QP_LINT_MAX 20                /* 一次最多报这么多条，够看了 */
+
+typedef enum {
+    LINT_COND_NEVER = 0,      /* 条件永远不成立            */
+    LINT_COND_NOTERM,         /* 规则一个条件都没有        */
+    LINT_COND_DANGLING,       /* 条件指向的变量没选/已删除 */
+    LINT_COND_EMPTY,          /* 命中后把这一段变成空      */
+    LINT_PARSE_DANGLING,      /* 解析规则的目标已删除      */
+    LINT_PLACEHOLDER          /* 占位符名字认不出来        */
+} LintKind;
+
+typedef struct {
+    LintKind kind;
+    int      seg_index;              /* 片段序号，0 起 —— 界面据此跳过去 */
+    int      rule_index;             /* 规则序号，0 起；-1 = 与规则无关   */
+    wchar_t  text[QP_RESULT_MAX];    /* 已经写成人话的一句描述            */
+} LintIssue;
+
+/* 返回写进 out 的条数（最多 cap 条）。LintIssue 不小，别放栈上 */
+int tmpl_lint(const Template *t, LintIssue *out, int cap);
 
 #ifdef __cplusplus
 }

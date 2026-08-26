@@ -3,7 +3,7 @@
 #
 #  make            构建全部：程序 + 卸载器 + 安装包
 #  make app        只构建 build/QuickPhrase.exe
-#  make setup      构建安装包 dist/QuickPhrase-2.1.0-setup.exe
+#  make setup      构建安装包 dist/QuickPhrase-2.2.0-setup.exe
 #  make test       在本机（Linux/任意平台）编译并运行引擎/存储单元测试
 #  make size       显示产物体积
 #  make clean
@@ -11,7 +11,7 @@
 #  交叉编译工具链：MinGW-w64（x86_64-w64-mingw32-gcc）
 # ==============================================================
 
-VERSION   := 2.1.0
+VERSION   := 2.2.0
 CC        := x86_64-w64-mingw32-gcc
 WINDRES   := x86_64-w64-mingw32-windres
 STRIP     := x86_64-w64-mingw32-strip
@@ -36,7 +36,7 @@ UNI_EXE   := $(BUILD)/uninstall.exe
 
 ICONS     := res/app.ico res/setup.ico
 
-.PHONY: all app setup test size clean dirs icons
+.PHONY: all app setup test size objsize clean dirs icons
 
 all: setup
 
@@ -94,6 +94,14 @@ size:
 	@ls -l $(APP_EXE) $(UNI_EXE) $(SETUP) 2>/dev/null | \
 	    awk '{printf "  %-46s %8.1f KB\n", $$9, $$5/1024}'
 	@echo "--------------------------------------------"
+
+# 各编译单元的目标文件体积（看代码量都堆在哪儿，不产出可运行程序）
+objsize: dirs
+	@for f in main ui ui_dialogs engine storage cJSON; do \
+	    $(CC) $(CFLAGS) -ffunction-sections -fdata-sections \
+	        -c src/$$f.c -o $(BUILD)/objsize_$$f.o; done
+	@ls -l $(BUILD)/objsize_*.o | \
+	    awk '{printf "  %-40s %8.1f KB\n", $$9, $$5/1024}' | sort -k2 -rn
 
 clean:
 	rm -rf $(BUILD) $(DIST)

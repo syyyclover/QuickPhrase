@@ -118,6 +118,7 @@
 #define IDC_ED_SEG_REF_MODE     3046   /* 取法：整体/分隔符/按字  */
 #define IDC_ED_SEG_REF_A        3047   /* 取法参数一：分隔符 / 起始 */
 #define IDC_ED_SEG_REF_B        3048   /* 取法参数二：第N段 / 取几个 */
+#define IDC_ED_SEG_HINT         3049   /* 固定内容的占位符提示行    */
 
 /* 规则编辑子对话框 */
 #define IDC_RL_TYPE             3101
