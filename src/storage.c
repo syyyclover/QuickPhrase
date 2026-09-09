@@ -263,12 +263,18 @@ static RefMode ref_mode_from_key(const char *k)
 
 static const char *parse_type_key(ParseRuleType t)
 {
-    return t == PARSE_CONTAINS ? "contains" : "split";
+    switch (t) {
+    case PARSE_CONTAINS: return "contains";
+    case PARSE_BETWEEN:  return "between";
+    default:             return "split";
+    }
 }
 
 static ParseRuleType parse_type_from_key(const char *k)
 {
-    return (k && strcmp(k, "contains") == 0) ? PARSE_CONTAINS : PARSE_SPLIT;
+    if (k && strcmp(k, "contains") == 0) return PARSE_CONTAINS;
+    if (k && strcmp(k, "between") == 0)  return PARSE_BETWEEN;
+    return PARSE_SPLIT;
 }
 
 static const char *cond_op_key(CondOperator op)
@@ -326,6 +332,8 @@ static cJSON *parse_rule_to_json(const ParseRule *r)
     json_add_w(o, "delimiter", r->delimiter);
     cJSON_AddNumberToObject(o, "segmentIndex", r->segment_index);
     json_add_w(o, "keyword", r->keyword);
+    json_add_w(o, "markerAfter", r->marker_after);
+    if (r->per_paragraph) cJSON_AddBoolToObject(o, "perParagraph", 1);
     json_add_w(o, "targetSegmentId", r->target_segment_id);
     json_add_w(o, "fillValue", r->fill_value);
     return o;
@@ -403,6 +411,7 @@ static cJSON *segment_to_json(const Segment *s)
         }
         if (s->type == SEG_MULTI_SELECT) json_add_w(o, "separator", s->separator);
         if (s->hidden) cJSON_AddBoolToObject(o, "hidden", 1);
+        if (s->no_output) cJSON_AddBoolToObject(o, "noOutput", 1);
         if (s->type == SEG_TEXT && s->multiline) cJSON_AddBoolToObject(o, "multiline", 1);
         if (s->type == SEG_DATETIME) json_add_w(o, "timeFormat", s->time_format);
         /* 引用：不引用时整组字段都不写，存档保持干净 */
@@ -437,6 +446,10 @@ static cJSON *template_to_json(const Template *t)
     json_add_w(o, "id", t->id);
     json_add_w(o, "name", t->name);
     json_add_w(o, "groupId", t->group_id);
+    if (t->batch_mode) {
+        cJSON_AddBoolToObject(o, "batchMode", 1);
+        json_add_w(o, "batchSourceId", t->batch_source_id);
+    }
     json_add_w(o, "createdAt", t->created_at);
     json_add_w(o, "updatedAt", t->updated_at);
     arr = cJSON_AddArrayToObject(o, "segments");
@@ -495,6 +508,8 @@ static ParseRule *parse_rule_from_json(const cJSON *o)
     r->segment_index = json_get_int(o, "segmentIndex", 1);
     if (r->segment_index < 1) r->segment_index = 1;
     json_get_w(o, "keyword", r->keyword, QP_KEYWORD_MAX);
+    json_get_w(o, "markerAfter", r->marker_after, QP_KEYWORD_MAX);
+    r->per_paragraph = json_get_int(o, "perParagraph", 0) ? 1 : 0;
     json_get_w(o, "targetSegmentId", r->target_segment_id, QP_ID_MAX);
     json_get_w(o, "fillValue", r->fill_value, QP_VALUE_MAX);
     return r;
@@ -576,6 +591,7 @@ static Segment *segment_from_json(const cJSON *o)
     json_get_w(o, "placeholder", s->placeholder, QP_PLACEHOLD_MAX);
     json_get_w(o, "defaultValue", s->default_value, QP_VALUE_MAX);
     s->hidden = (type != SEG_STATIC && json_get_int(o, "hidden", 0)) ? 1 : 0;
+    s->no_output = (type != SEG_STATIC && json_get_int(o, "noOutput", 0)) ? 1 : 0;
     s->multiline = (type == SEG_TEXT && json_get_int(o, "multiline", 0)) ? 1 : 0;
     if (cJSON_GetObjectItemCaseSensitive(o, "separator")) {
         json_get_w(o, "separator", s->separator, QP_SEP_MAX);
@@ -635,6 +651,8 @@ static Template *template_from_json(const cJSON *o)
     json_get_w(o, "name", t->name, QP_NAME_MAX);
     if (!t->name[0]) qp_strlcpy(t->name, L"未命名模板", QP_NAME_MAX);
     json_get_w(o, "groupId", t->group_id, QP_ID_MAX);
+    t->batch_mode = json_get_int(o, "batchMode", 0) ? 1 : 0;
+    json_get_w(o, "batchSourceId", t->batch_source_id, QP_ID_MAX);
     json_get_w(o, "createdAt", t->created_at, QP_TIME_MAX);
     json_get_w(o, "updatedAt", t->updated_at, QP_TIME_MAX);
     if (!t->created_at[0]) qp_now_iso(t->created_at, QP_TIME_MAX);
