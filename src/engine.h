@@ -194,9 +194,6 @@ typedef struct EvalField {
     wchar_t value[QP_VALUE_MAX];        /* 当前生效值（UI 显示 / 输出）*/
     wchar_t user_value[QP_VALUE_MAX];   /* 用户最近一次手动输入        */
     int     user_touched;               /* 用户是否手动输入过          */
-    wchar_t sticky[QP_VALUE_MAX];       /* 规则曾推导出的值（不随规则
-                                           失配而清空，见 eval_run）  */
-    int     has_sticky;
     int     rule_driven;                /* 本次求值是否由规则推导得到
                                            （规则值优先，手动输入让位）*/
 } EvalField;
@@ -347,8 +344,6 @@ int          eval_index_of_id(const EvalContext *ctx, const wchar_t *id);
 int          eval_index_of_label(const EvalContext *ctx, const wchar_t *label);
 /* 用户输入（规则推导出值时以规则为准），随后需调用 eval_run */
 void         eval_set_user_value(EvalContext *ctx, int idx, const wchar_t *v);
-/* 恢复「上次推导出的兜底值」：并行填写切回来时用，见 sess_activate */
-void         eval_set_sticky(EvalContext *ctx, int idx, const wchar_t *v);
 /* 执行解析规则 + 条件规则，迭代至稳定 */
 void         eval_run(EvalContext *ctx);
 /* 拼接输出 */

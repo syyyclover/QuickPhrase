@@ -1292,9 +1292,6 @@ typedef struct {
     unsigned  used;                /* 最近一次激活的序号             */
     wchar_t (*ids)[QP_ID_MAX];     /* 变量 id 列表（激活时抓取）     */
     wchar_t **vals;                /* 与 ids 一一对应；NULL = 没手填过 */
-    wchar_t **sticks;              /* 规则曾推导出的兜底值（sticky）；
-                                      不存的话「只靠匹配填、此刻已不
-                                      再命中」的变量切回来会少一段   */
     int       count;
 } Session;
 
@@ -1328,11 +1325,6 @@ static void sess_drop_values(Session *s)
         for (i = 0; i < s->count; ++i) free(s->vals[i]);
         free(s->vals);
         s->vals = NULL;
-    }
-    if (s->sticks) {
-        for (i = 0; i < s->count; ++i) free(s->sticks[i]);
-        free(s->sticks);
-        s->sticks = NULL;
     }
     free(s->ids);
     s->ids = NULL;
@@ -1398,9 +1390,7 @@ static int sess_has_input(const Session *s)
 /* ---------------------- 取值的保存与恢复 -------------------------- */
 
 /* 把上下文里的手填值抄进会话。只读 EvalContext，不碰 Segment，因此哪怕
-   整份数据已经被释放（切数据目录）也能安全调用。
-   sticky 一并抄走：它是「只靠变量匹配填、此刻规则已不再命中」时的兜底值，
-   不带上的话切走再切回来输出就会少一段（承诺是「内容都还在」）。 */
+   整份数据已经被释放（切数据目录）也能安全调用。 */
 static void sess_save(Session *s)
 {
     int i;
@@ -1409,20 +1399,15 @@ static void sess_save(Session *s)
         const EvalField *f = &g_ctx->fields[i];
         free(s->vals[i]);
         s->vals[i] = f->user_touched ? qp_wcsdup(f->user_value) : NULL;
-        if (s->sticks) {
-            free(s->sticks[i]);
-            s->sticks[i] = f->has_sticky ? qp_wcsdup(f->sticky) : NULL;
-        }
     }
 }
 
-/* 激活一份：建上下文 → 把上次的手填值与 sticky 按变量 id 喂回去 → 重抓
-   id 列表。规则推导的部分交给 eval_run 重算，结果与切走前一致。 */
+/* 激活一份：建上下文 → 把上次的手填值按变量 id 喂回去 → 重抓 id 列表。
+   规则推导的部分交给 eval_run 根据当前来源重新计算。 */
 static void sess_activate(Session *s, const Template *t)
 {
     wchar_t (*ids)[QP_ID_MAX] = NULL;
     wchar_t **vals = NULL;
-    wchar_t **sticks = NULL;
     int i, n;
 
     if (!s || !t) return;
@@ -1435,7 +1420,6 @@ static void sess_activate(Session *s, const Template *t)
         int idx = eval_index_of_id(g_ctx, s->ids[i]);
         if (idx < 0) continue;
         if (s->vals && s->vals[i]) eval_set_user_value(g_ctx, idx, s->vals[i]);
-        if (s->sticks && s->sticks[i]) eval_set_sticky(g_ctx, idx, s->sticks[i]);
     }
     eval_run(g_ctx);
 
@@ -1444,9 +1428,8 @@ static void sess_activate(Session *s, const Template *t)
     if (n > 0) {
         ids  = (wchar_t (*)[QP_ID_MAX])calloc((size_t)n, sizeof(*ids));
         vals = (wchar_t **)calloc((size_t)n, sizeof(*vals));
-        sticks = (wchar_t **)calloc((size_t)n, sizeof(*sticks));
-        if (!ids || !vals || !sticks) {                 /* 保住旧快照 */
-            free(ids); free(vals); free(sticks);
+        if (!ids || !vals) {                            /* 保住旧快照 */
+            free(ids); free(vals);
             return;
         }
     }
@@ -1456,7 +1439,6 @@ static void sess_activate(Session *s, const Template *t)
                    QP_ID_MAX);
     s->ids = ids;
     s->vals = vals;
-    s->sticks = sticks;
     s->count = n;
 }
 
@@ -1897,20 +1879,16 @@ static void sess_duplicate(int vis)
     if (src->count > 0 && src->ids) {
         dst->ids  = (wchar_t (*)[QP_ID_MAX])calloc((size_t)src->count, sizeof(*dst->ids));
         dst->vals = (wchar_t **)calloc((size_t)src->count, sizeof(*dst->vals));
-        dst->sticks = (wchar_t **)calloc((size_t)src->count, sizeof(*dst->sticks));
-        if (dst->ids && dst->vals && dst->sticks) {
+        if (dst->ids && dst->vals) {
             dst->count = src->count;
             for (i = 0; i < src->count; ++i) {
                 qp_strlcpy(dst->ids[i], src->ids[i], QP_ID_MAX);
                 dst->vals[i] = (src->vals && src->vals[i])
                                  ? qp_wcsdup(src->vals[i]) : NULL;
-                dst->sticks[i] = (src->sticks && src->sticks[i])
-                                 ? qp_wcsdup(src->sticks[i]) : NULL;
             }
         } else {
             free(dst->ids);  dst->ids = NULL;
             free(dst->vals); dst->vals = NULL;
-            free(dst->sticks); dst->sticks = NULL;
         }
     }
     sess_rebind(dst);

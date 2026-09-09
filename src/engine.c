@@ -1275,23 +1275,15 @@ static const wchar_t *seg_default_of(const Segment *s)
     if (!s) return L"";
     if (s->type == SEG_STATIC) return s->content;
     if (s->default_value[0]) return s->default_value;
-    /* 单选未设默认值时取第一个选项，避免输出空洞 */
-    if (s->type == SEG_SELECT && s->option_count > 0 && s->options && s->options[0])
-        return s->options[0];
     return L"";
 }
 
-/* 片段的「兜底值」：默认值优先；默认值为空（只靠变量匹配填充的变量）时，
-   保留上一次规则推导出的值，避免规则某一刻不再命中就在输出里留下空洞。
-   「重置」会清掉 sticky，回到真正的空。 */
+/* 片段的「兜底值」：手填值优先，否则只取显式默认值。 */
 static const wchar_t *field_fallback_of(const EvalField *f)
 {
-    const wchar_t *d;
     if (!f) return L"";
-    d = seg_default_of(f->seg);
-    if (d && *d) return d;
-    if (f->has_sticky && f->sticky[0]) return f->sticky;
-    return L"";
+    if (f->user_touched) return f->user_value;
+    return seg_default_of(f->seg);
 }
 
 void eval_reset(EvalContext *ctx)
@@ -1301,10 +1293,8 @@ void eval_reset(EvalContext *ctx)
     for (i = 0; i < ctx->count; ++i) {
         EvalField *f = &ctx->fields[i];
         f->user_touched = 0;
-        f->has_sticky = 0;
         f->rule_driven = 0;
         f->user_value[0] = L'\0';
-        f->sticky[0] = L'\0';
         qp_strlcpy(f->value, seg_default_of(f->seg), QP_VALUE_MAX);
         /* 时间变量：开这份填写（新建 / 切模板 / 重置）时就按当下拍一张快照，
            写进「手动填写」那一层。放在这里而不是每次求值都取 time()，是为了
@@ -1352,18 +1342,6 @@ void eval_set_user_value(EvalContext *ctx, int idx, const wchar_t *v)
        eval_run 里就以规则值为准（详见 eval_run 第 3 步）。 */
 }
 
-/* 恢复兜底值。并行填写切回来时用：一个「只靠匹配填、此刻已不再命中」的变量，
-   靠的就是这个值才不会在输出里空一段，所以它跟手填值一样得随快照一起回来。 */
-void eval_set_sticky(EvalContext *ctx, int idx, const wchar_t *v)
-{
-    EvalField *f;
-    if (!ctx || idx < 0 || idx >= ctx->count) return;
-    f = &ctx->fields[idx];
-    if (!v || !*v) { f->sticky[0] = L'\0'; f->has_sticky = 0; return; }
-    qp_strlcpy(f->sticky, v, QP_VALUE_MAX);
-    f->has_sticky = 1;
-}
-
 /* 解析规则是否命中；命中时 extracted 返回提取到的内容 */
 static int parse_rule_hit(const ParseRule *r, const wchar_t *input,
                           wchar_t *extracted, size_t cap)
@@ -1396,6 +1374,7 @@ static int cond_term_hit(const CondTerm *t, const wchar_t *trigger_value)
     int hit = 0, i;
     if (!t) return 0;
     if (!trigger_value) trigger_value = L"";
+    if (t->op != OP_EMPTY && qp_is_blank(trigger_value)) return 0;
     switch (t->op) {
     case OP_CONTAINS:
         hit = t->match_value[0] && qp_istr(trigger_value, t->match_value) != NULL;
@@ -1628,10 +1607,6 @@ void eval_run(EvalContext *ctx)
     for (i = 0; i < ctx->count; ++i) {
         EvalField *f = &ctx->fields[i];
         f->rule_driven = derived_set[i];
-        if (derived_set[i] && derived[i][0]) {
-            qp_strlcpy(f->sticky, derived[i], QP_VALUE_MAX);  /* 推导过的值留作兜底 */
-            f->has_sticky = 1;
-        }
         qp_strlcpy(f->value, work[i], QP_VALUE_MAX);
     }
 
