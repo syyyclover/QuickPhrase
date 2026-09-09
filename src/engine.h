@@ -57,7 +57,8 @@ typedef enum {
 
 typedef enum {
     PARSE_SPLIT = 0,      /* 按分隔符切割取第 N 段 */
-    PARSE_CONTAINS = 1    /* 包含关键词            */
+    PARSE_CONTAINS = 1,   /* 包含关键词            */
+    PARSE_BETWEEN = 2     /* 取「前标记」与「后标记」之间的内容 */
 } ParseRuleType;
 
 typedef enum {
@@ -83,7 +84,10 @@ typedef struct ParseRule {
     ParseRuleType type;
     wchar_t delimiter[QP_SEP_MAX];        /* split: 分隔符            */
     int     segment_index;                /* split: 第 N 段, 从 1 开始 */
-    wchar_t keyword[QP_KEYWORD_MAX];      /* 命中关键词（空=任意命中） */
+    wchar_t keyword[QP_KEYWORD_MAX];      /* split/contains: 命中关键词（空=任意命中）；
+                                             between: 前标记（空=从头）           */
+    wchar_t marker_after[QP_KEYWORD_MAX]; /* between: 后标记（空=到末尾）         */
+    int     per_paragraph;                /* 1 = 源按换行拆成多段，逐段抽取、结果按行合并 */
     wchar_t target_segment_id[QP_ID_MAX]; /* 目标变量片段 id          */
     wchar_t fill_value[QP_VALUE_MAX];     /* 填充值（空=用提取到的值） */
     struct ParseRule *next;
@@ -129,6 +133,10 @@ typedef struct Segment {
     wchar_t default_value[QP_VALUE_MAX];
     int     hidden;                       /* 1 = 填写界面不显示，只靠
                                              变量匹配/默认值填充      */
+    int     no_output;                    /* 1 = 参与匹配/引用/占位符，但不进入
+                                             最终输出。拼表格行时，源句子与只为
+                                             拼行服务的列变量都靠它留在输出之外，
+                                             只剩那一个汇总固定片段成行         */
     int     multiline;                    /* text：1 = 多行大文本框    */
     wchar_t time_format[QP_FORMAT_MAX];   /* datetime：格式串，空=默认 */
     /* 引用：本片段的值直接取自另一个变量（整体或其中一部分）。
@@ -149,6 +157,8 @@ typedef struct Template {
     wchar_t id[QP_ID_MAX];
     wchar_t name[QP_NAME_MAX];
     wchar_t group_id[QP_ID_MAX];          /* 空 = 未分组 */
+    int     batch_mode;                   /* 1 = 批量：源变量按行重复整模板渲染，各行以换行合并 */
+    wchar_t batch_source_id[QP_ID_MAX];   /* 批量的源变量片段 id（空=未选） */
     Segment *segments;
     wchar_t created_at[QP_TIME_MAX];
     wchar_t updated_at[QP_TIME_MAX];
@@ -222,6 +232,10 @@ int      qp_is_blank(const wchar_t *s);
 /* 按 delimiter 切割 src，取第 index 段（1 起）。成功返回 1 */
 int      qp_split_take(const wchar_t *src, const wchar_t *delim, int index,
                        wchar_t *out, size_t cap);
+/* 取 before 之后、after 之前的子串（before 空=从头，after 空=到末尾）。
+   找不到标记返回 0。大小写不敏感，与 qp_istr 一致 */
+int      qp_between_take(const wchar_t *src, const wchar_t *before,
+                         const wchar_t *after, wchar_t *out, size_t cap);
 /* --------------------------- 占位符 --------------------------------
    固定片段的内容里可以写 {变量名}，生成时换成那个变量此刻的值。
    {{ 输出一个字面的 {；认不出的名字原样保留（写错了要看得见）；换进来的
@@ -348,6 +362,10 @@ void         eval_set_user_value(EvalContext *ctx, int idx, const wchar_t *v);
 void         eval_run(EvalContext *ctx);
 /* 拼接输出 */
 size_t       eval_render(const EvalContext *ctx, wchar_t *out, size_t cap);
+/* 批量渲染：模板开了 batch_mode 时，把源变量的值按换行拆成多行，逐行注入源变量后
+   各渲染一遍，结果以换行合并（常量列不变、源派生列逐行变）。未开批量或源为空时
+   等同 eval_render。会临时改动并还原 ctx（结束后 ctx 与整段已粘贴一致）。 */
+size_t       eval_render_batch(EvalContext *ctx, wchar_t *out, size_t cap);
 /* 便捷：按默认值渲染（模板编辑器预览用） */
 size_t       tmpl_render_defaults(const Template *t, wchar_t *out, size_t cap);
 
@@ -376,7 +394,8 @@ typedef enum {
     LINT_COND_DANGLING,       /* 条件指向的变量没选/已删除 */
     LINT_COND_EMPTY,          /* 命中后把这一段变成空      */
     LINT_PARSE_DANGLING,      /* 解析规则的目标已删除      */
-    LINT_PLACEHOLDER          /* 占位符名字认不出来        */
+    LINT_PLACEHOLDER,         /* 占位符名字认不出来        */
+    LINT_BATCH_SOURCE         /* 批量模式的源变量没选/已删除/不是文本变量 */
 } LintKind;
 
 typedef struct {

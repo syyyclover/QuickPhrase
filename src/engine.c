@@ -144,6 +144,41 @@ int qp_split_take(const wchar_t *src, const wchar_t *delim, int index,
     return 0;
 }
 
+int qp_between_take(const wchar_t *src, const wchar_t *before,
+                    const wchar_t *after, wchar_t *out, size_t cap)
+{
+    const wchar_t *start, *end;
+    size_t len;
+
+    if (out && cap) out[0] = L'\0';
+    if (!src || !out || cap == 0) return 0;
+
+    /* 前标记：空 = 从头；非空 = 定位到它之后（大小写不敏感，与 qp_istr 一致）。
+       找不到就算没命中 —— 与 split 取不到段一样返回 0，宁可不填不能乱填。 */
+    if (before && *before) {
+        const wchar_t *p = qp_istr(src, before);
+        if (!p) return 0;
+        start = p + wcslen(before);
+    } else {
+        start = src;
+    }
+
+    /* 后标记：空 = 到末尾；非空 = 从 start 之后再找一次，找不到同样算没命中。 */
+    if (after && *after) {
+        const wchar_t *q = qp_istr(start, after);
+        if (!q) return 0;
+        end = q;
+    } else {
+        end = start + wcslen(start);
+    }
+
+    len = (size_t)(end - start);
+    if (len >= cap) len = cap - 1;
+    memcpy(out, start, len * sizeof(wchar_t));
+    out[len] = L'\0';
+    return 1;
+}
+
 /* --------------------------- 占位符 ------------------------------- */
 /*
  * 固定片段的内容里可以写 {变量名}，生成时换成那个变量此刻的值。这样「一句话里
@@ -201,13 +236,29 @@ static size_t append_n(wchar_t *out, size_t cap, size_t used,
     return used;
 }
 
-/* 追加一段普通文本，途中把 {{ 折成一个 { */
+/* 追加一段普通文本，途中做两件折叠：
+   {{        → 一个字面的 {
+   \t \n \\  → 制表符 / 换行 / 反斜杠；其余 \x 原样保留（认不出就照打，
+               与「认不出的 {名字} 原样保留」同一态度）。
+   只有固定片段的正文会走到这里（占位符展开的必经之路），所以用户自己敲进
+   文本框里的 \ 与 { 永远是字面量。 */
 static size_t append_unescaped(wchar_t *out, size_t cap, size_t used,
                                const wchar_t *src, size_t n)
 {
     size_t i;
     for (i = 0; i < n; ++i) {
-        if (src[i] == L'{' && i + 1 < n && src[i + 1] == L'{') ++i;
+        wchar_t ch = src[i];
+        if (ch == L'{' && i + 1 < n && src[i + 1] == L'{') {
+            ++i;                                   /* {{ 折成一个字面 { */
+        } else if (ch == L'\\' && i + 1 < n) {
+            wchar_t nx = src[i + 1];
+            if      (nx == L't')  { ch = L'\t'; ++i; }
+            else if (nx == L'n')  { ch = L'\n'; ++i; }
+            else if (nx == L'\\') { ch = L'\\'; ++i; }
+            /* 其余 \x：ch 仍是 '\\'，原样输出，x 下一轮照常处理 */
+            used = append_n(out, cap, used, &ch, 1);
+            continue;
+        }
         used = append_n(out, cap, used, src + i, 1);
     }
     return used;
@@ -508,6 +559,7 @@ Segment *seg_clone(const Segment *s)
     qp_strlcpy(c->separator, s->separator, QP_SEP_MAX);
     qp_strlcpy(c->default_value, s->default_value, QP_VALUE_MAX);
     c->hidden = s->hidden;
+    c->no_output = s->no_output;
     c->multiline = s->multiline;
     qp_strlcpy(c->time_format, s->time_format, QP_FORMAT_MAX);
     qp_strlcpy(c->ref_segment_id, s->ref_segment_id, QP_ID_MAX);
@@ -874,6 +926,8 @@ Template *tmpl_clone(const Template *t)
     qp_strlcpy(c->id, t->id, QP_ID_MAX);
     qp_strlcpy(c->name, t->name, QP_NAME_MAX);
     qp_strlcpy(c->group_id, t->group_id, QP_ID_MAX);
+    c->batch_mode = t->batch_mode;
+    qp_strlcpy(c->batch_source_id, t->batch_source_id, QP_ID_MAX);
     qp_strlcpy(c->created_at, t->created_at, QP_TIME_MAX);
     qp_strlcpy(c->updated_at, t->updated_at, QP_TIME_MAX);
     for (s = t->segments; s; s = s->next)
@@ -1361,11 +1415,65 @@ static int parse_rule_hit(const ParseRule *r, const wchar_t *input,
         if (extracted) qp_strlcpy(extracted, part, cap);
         return 1;
     }
+    if (r->type == PARSE_BETWEEN) {
+        /* 复用 keyword 作前标记、marker_after 作后标记 */
+        wchar_t part[QP_VALUE_MAX];
+        if (!qp_between_take(input, r->keyword, r->marker_after, part, QP_VALUE_MAX))
+            return 0;
+        qp_trim(part);
+        if (!part[0]) return 0;   /* 取到空视为未命中，与 split 一致 */
+        if (extracted) qp_strlcpy(extracted, part, cap);
+        return 1;
+    }
     /* PARSE_CONTAINS */
     if (!r->keyword[0]) return 0;
     if (!qp_istr(input, r->keyword)) return 0;
     if (extracted) qp_strlcpy(extracted, r->keyword, cap);
     return 1;
+}
+
+/* 应用一条解析规则，命中则把「要填进目标的值」写进 out、返回 1。
+   fill_value 非空则用它，否则用提取到的值 —— 与旧 step-1 的语义一致。
+   per_paragraph 打开时：把输入按换行拆成多段，逐段抽取，命中的结果按换行
+   合并（未命中的段跳过）；关闭时就是单段，行为与从前完全一样。 */
+static int parse_rule_apply(const ParseRule *r, const wchar_t *input,
+                            wchar_t *out, size_t cap)
+{
+    wchar_t extracted[QP_VALUE_MAX];
+    if (out && cap) out[0] = L'\0';
+    if (!r || !input || !out || cap == 0) return 0;
+
+    if (!r->per_paragraph) {
+        if (!parse_rule_hit(r, input, extracted, QP_VALUE_MAX)) return 0;
+        qp_strlcpy(out, r->fill_value[0] ? r->fill_value : extracted, cap);
+        return 1;
+    }
+
+    {
+        const wchar_t *p = input, *nl;
+        size_t used = 0;
+        int any = 0;
+        wchar_t line[QP_VALUE_MAX];
+        for (;;) {
+            size_t llen;
+            nl = wcschr(p, L'\n');
+            llen = nl ? (size_t)(nl - p) : wcslen(p);
+            if (llen >= QP_VALUE_MAX) llen = QP_VALUE_MAX - 1;
+            wmemcpy(line, p, llen);
+            line[llen] = L'\0';
+            if (llen && line[llen - 1] == L'\r') line[llen - 1] = L'\0';  /* CRLF */
+            if (!qp_is_blank(line) &&
+                parse_rule_hit(r, line, extracted, QP_VALUE_MAX)) {
+                const wchar_t *val = r->fill_value[0] ? r->fill_value : extracted;
+                if (any) used = append_n(out, cap, used, L"\n", 1);
+                used = append_n(out, cap, used, val, wcslen(val));
+                any = 1;
+            }
+            if (!nl) break;
+            p = nl + 1;
+        }
+        return any;
+    }
 }
 
 /* 单个条件项是否成立（已计入 negate） */
@@ -1509,14 +1617,12 @@ void eval_run(EvalContext *ctx)
             const ParseRule *r;
             if (!s || s->type != SEG_TEXT) continue;
             for (r = s->parse_rules; r; r = r->next) {
-                wchar_t extracted[QP_VALUE_MAX];
+                wchar_t produced[QP_VALUE_MAX];
                 int target = eval_index_of_id(ctx, r->target_segment_id);
                 if (target < 0 || target >= ctx->count) continue;
                 if (derived_set[target]) continue;          /* 第一个命中的生效 */
-                if (!parse_rule_hit(r, work[i], extracted, QP_VALUE_MAX)) continue;
-                qp_strlcpy(derived[target],
-                           r->fill_value[0] ? r->fill_value : extracted,
-                           QP_VALUE_MAX);
+                if (!parse_rule_apply(r, work[i], produced, QP_VALUE_MAX)) continue;
+                qp_strlcpy(derived[target], produced, QP_VALUE_MAX);
                 derived_set[target] = 1;
                 parse_set[target] = 1;
             }
@@ -1576,12 +1682,14 @@ void eval_run(EvalContext *ctx)
             } else {
                 qp_strlcpy(next, field_fallback_of(f), QP_VALUE_MAX);
             }
-            /* 固定片段里的 {变量名} 换成那个变量此刻的值。放在这里而不是渲染时，
+            /* 固定片段里的 {变量名} 换成那个变量此刻的值，同时把 \t \n \\ 这些
+               转义折出来（列输出靠的就是 \t 分列、\n 分行）。放在这里而不是渲染时，
                是为了让它跟着不动点一起收敛：被引用的变量本轮才刚被规则推出值，
                下一轮这里就取得到了。每轮都是从模板原文重新展开一次，所以不会
-               越展开越长。只有固定片段做替换 —— 用户自己敲进文本框的 { 永远
-               是字面量，不会被当成占位符解释。 */
-            if (f->seg && f->seg->type == SEG_STATIC && wcschr(next, L'{')) {
+               越展开越长。只有固定片段做替换 —— 用户自己敲进文本框的 { 与 \
+               永远是字面量，不会被当成占位符或转义解释。 */
+            if (f->seg && f->seg->type == SEG_STATIC &&
+                (wcschr(next, L'{') || wcschr(next, L'\\'))) {
                 wchar_t expanded[QP_VALUE_MAX];
                 PlaceholderCtx pc;
                 pc.ctx = ctx;
@@ -1627,6 +1735,9 @@ size_t eval_render(const EvalContext *ctx, wchar_t *out, size_t cap)
     for (i = 0; i < ctx->count; ++i) {
         const wchar_t *v = ctx->fields[i].value;
         size_t len;
+        /* 「不计入输出」的变量：照常参与匹配/引用/占位符，但不拼进最终口径。
+           拼表格行时，源句子与只为拼行服务的列变量都靠它留在输出之外。 */
+        if (ctx->fields[i].seg && ctx->fields[i].seg->no_output) continue;
         if (!v || !*v) continue;
         len = wcslen(v);
         if (used + len + 1 > cap) len = (cap > used + 1) ? (cap - used - 1) : 0;
@@ -1635,6 +1746,74 @@ size_t eval_render(const EvalContext *ctx, wchar_t *out, size_t cap)
         used += len;
         out[used] = L'\0';
     }
+    return used;
+}
+
+size_t eval_render_batch(EvalContext *ctx, wchar_t *out, size_t cap)
+{
+    int src, saved_touched, first = 1;
+    const wchar_t *srcval, *p, *nl;
+    wchar_t saved[QP_VALUE_MAX], whole[QP_VALUE_MAX], line[QP_VALUE_MAX];
+    wchar_t *row;
+    size_t used = 0;
+
+    if (!out || cap == 0) return 0;
+    out[0] = L'\0';
+    if (!ctx) return 0;
+
+    /* 没开批量 / 没模板 / 没选源变量 / 源已删除 → 就按普通单次渲染 */
+    if (!ctx->tmpl || !ctx->tmpl->batch_mode || !ctx->tmpl->batch_source_id[0])
+        return eval_render(ctx, out, cap);
+    src = eval_index_of_id(ctx, ctx->tmpl->batch_source_id);
+    if (src < 0) return eval_render(ctx, out, cap);
+
+    /* 源变量此刻的值：优先取用户手填的整段，否则取生效值 */
+    srcval = ctx->fields[src].user_touched ? ctx->fields[src].user_value
+                                           : ctx->fields[src].value;
+    /* 源为空或只有一行 → 退化为单次渲染，免得边打字边预览时闪空 */
+    if (qp_is_blank(srcval) || !wcschr(srcval, L'\n'))
+        return eval_render(ctx, out, cap);
+
+    /* row 有 QP_OUTPUT_MAX 那么大，放堆上，别撑爆栈 */
+    row = (wchar_t *)malloc(QP_OUTPUT_MAX * sizeof(wchar_t));
+    if (!row) return eval_render(ctx, out, cap);
+
+    /* 快照源字段，逐行注入后各渲染一遍，最后还原 */
+    qp_strlcpy(saved, ctx->fields[src].user_value, QP_VALUE_MAX);
+    saved_touched = ctx->fields[src].user_touched;
+    qp_strlcpy(whole, srcval, QP_VALUE_MAX);
+
+    for (p = whole; ; ) {
+        size_t llen;
+        nl = wcschr(p, L'\n');
+        llen = nl ? (size_t)(nl - p) : wcslen(p);
+        if (llen >= QP_VALUE_MAX) llen = QP_VALUE_MAX - 1;
+        wmemcpy(line, p, llen);
+        line[llen] = L'\0';
+        if (llen && line[llen - 1] == L'\r') line[llen - 1] = L'\0';   /* CRLF */
+        if (!qp_is_blank(line)) {
+            eval_set_user_value(ctx, src, line);
+            eval_run(ctx);
+            eval_render(ctx, row, QP_OUTPUT_MAX);
+            if (!first) used = append_n(out, cap, used, L"\n", 1);
+            used = append_n(out, cap, used, row, wcslen(row));
+            first = 0;
+        }
+        if (!nl) break;
+        p = nl + 1;
+    }
+
+    /* 还原源字段并再跑一次，让 ctx 回到「整段已粘贴」的状态：填写界面照常显示
+       全文，切走存快照也存整段，与没开批量时一致。 */
+    if (saved_touched) {
+        eval_set_user_value(ctx, src, saved);
+    } else {
+        ctx->fields[src].user_touched = 0;
+        ctx->fields[src].user_value[0] = L'\0';
+    }
+    eval_run(ctx);
+
+    free(row);
     return used;
 }
 
@@ -1669,7 +1848,12 @@ const wchar_t *seg_type_name(SegmentType t)
 
 const wchar_t *parse_type_name(ParseRuleType t)
 {
-    return t == PARSE_SPLIT ? L"分割取段" : L"包含关键词";
+    switch (t) {
+    case PARSE_SPLIT:    return L"分割取段";
+    case PARSE_CONTAINS: return L"包含关键词";
+    case PARSE_BETWEEN:  return L"取两标记之间";
+    default:             return L"?";
+    }
 }
 
 const wchar_t *cond_op_name(CondOperator op)
@@ -1732,10 +1916,20 @@ void parse_rule_summary(const ParseRule *r, const Template *t, wchar_t *out, siz
                      r->delimiter, r->segment_index,
                      seg_name_by_id(t, r->target_segment_id),
                      r->fill_value[0] ? r->fill_value : L"(提取值)");
+    } else if (r->type == PARSE_BETWEEN) {
+        swprintf(out, cap, L"取「%ls」与「%ls」之间 → %ls = 「%ls」",
+                 r->keyword[0] ? r->keyword : L"开头",
+                 r->marker_after[0] ? r->marker_after : L"末尾",
+                 seg_name_by_id(t, r->target_segment_id),
+                 r->fill_value[0] ? r->fill_value : L"(提取值)");
     } else {
         swprintf(out, cap, L"包含「%ls」→ %ls = 「%ls」",
                  r->keyword, seg_name_by_id(t, r->target_segment_id),
                  r->fill_value[0] ? r->fill_value : L"(关键词)");
+    }
+    if (r->per_paragraph) {
+        size_t u = wcslen(out);
+        qp_strlcpy(out + u, L"（逐段）", cap > u ? cap - u : 0);
     }
 }
 
@@ -2023,6 +2217,27 @@ int tmpl_lint(const Template *t, LintIssue *out, int cap)
             }
         }
     }
+
+    /* 批量模式的源变量：没选 / 已删除 / 不是文本变量 → 这份批量出不来，提醒一句。
+       与其它体检项一样只提醒不拦人。 */
+    if (t->batch_mode && n < cap) {
+        wchar_t msg[QP_RESULT_MAX];
+        const Segment *bs = t->batch_source_id[0]
+                          ? tmpl_find_segment(t, t->batch_source_id) : NULL;
+        if (!bs) {
+            swprintf(msg, QP_RESULT_MAX,
+                     L"已开启「批量」，但源变量%ls，无法按行重复输出。",
+                     t->batch_source_id[0] ? L"已被删除" : L"还没选");
+            lint_add(out, &n, LINT_BATCH_SOURCE, -1, -1, msg);
+        } else if (bs->type != SEG_TEXT) {
+            swprintf(msg, QP_RESULT_MAX,
+                     L"已开启「批量」，但源变量「%ls」不是文本变量，"
+                     L"多行粘贴只有文本变量装得下。", seg_display_name(bs));
+            lint_add(out, &n, LINT_BATCH_SOURCE,
+                     seg_list_index_of(t->segments, bs), -1, msg);
+        }
+    }
+
     return n;
 }
 
