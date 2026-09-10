@@ -122,6 +122,12 @@
 #define IDC_ED_SEG_NOOUTPUT     3050   /* 变量：参与匹配但不进入最终输出 */
 #define IDC_ED_BATCH            3051   /* 模板：批量按行重复输出（复选） */
 #define IDC_ED_BATCH_SRC        3052   /* 批量的源变量（下拉）      */
+#define IDC_ED_TABLE_OUTPUT     3053   /* 模板：启用表格格式输出    */
+#define IDC_ED_TABLE_FORMAT     3054   /* 表格格式（可多行）        */
+#define IDC_ED_TABLE_INSERT     3055   /* 表格格式：变量下拉        */
+#define IDC_ED_TABLE_INSERT_BTN 3056   /* 表格格式：插入变量        */
+#define IDC_ED_PREVIEW_TEXT     3057   /* 编辑器预览：普通文本      */
+#define IDC_ED_PREVIEW_TABLE    3058   /* 编辑器预览：表格格式      */
 
 /* 规则编辑子对话框 */
 #define IDC_RL_TYPE             3101

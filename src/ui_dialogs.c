@@ -989,6 +989,10 @@ typedef struct {
     HWND hPropsHost, hPropTitle;
     int propsScroll;             /* 属性区的垂直滚动位置 */
     int propsWheelDelta;
+    HWND hTableOutput;
+    HWND hTableFmtLbl, hTableFmt, hTableInsert, hTableInsertBtn;
+    HWND hPreviewText, hPreviewTable;
+    OutputMode previewMode;      /* 编辑器预览在文本 / 表格口径间切换 */
     HWND hTypeLbl, hType;
     HWND hLabelLbl, hLabel;
     HWND hContentLbl, hContent;
@@ -1089,7 +1093,15 @@ static Segment *ed_cur_seg(EditorCtx *c)
 static void ed_update_preview(EditorCtx *c)
 {
     wchar_t out[QP_OUTPUT_MAX];
-    tmpl_render_defaults(c->t, out, QP_OUTPUT_MAX);
+    EvalContext *ctx = eval_create(c->t);
+    out[0] = L'\0';
+    if (ctx) {
+        eval_run(ctx);
+        eval_render_batch_mode(ctx, c->previewMode == OUTPUT_TABLE
+                                    ? OUTPUT_TABLE : OUTPUT_TEXT,
+                               out, QP_OUTPUT_MAX);
+        eval_destroy(ctx);
+    }
     qp_set_text_if_diff(c->hPreview, out);
 }
 
@@ -1337,6 +1349,22 @@ static void ed_layout_props(EditorCtx *c, int bodybot)
 
     ShowWindow(c->hPropTitle, has ? SW_SHOW : SW_HIDE);
     dwp = qp_defer(dwp, c->hPropTitle, x, -c->propsScroll, right, DPIX(18));
+
+    /* 模板级表格格式也放进这个有裁剪/滚动边界的 host：预览拖高时不会越过分隔条。 */
+    ShowWindow(c->hTableOutput, SW_SHOW);
+    dwp = qp_defer(dwp, c->hTableOutput, x, y, right - x, DPIX(22));
+    y += DPIX(22) + DPIX(4);
+    ED_ROW(c->hTableFmtLbl, c->hTableFmt, 1, 72);
+    ShowWindow(c->hTableInsert, SW_SHOW);
+    ShowWindow(c->hTableInsertBtn, SW_SHOW);
+    dwp = qp_defer(dwp, c->hTableInsert, cx, y, cw - DPIX(62), DPIX(24));
+    dwp = qp_defer(dwp, c->hTableInsertBtn, right - DPIX(56), y, DPIX(56), DPIX(24));
+    y += DPIX(24) + DPIX(4);
+    ShowWindow(c->hPreviewText, SW_SHOW);
+    ShowWindow(c->hPreviewTable, SW_SHOW);
+    dwp = qp_defer(dwp, c->hPreviewText, cx, y, DPIX(92), DPIX(22));
+    dwp = qp_defer(dwp, c->hPreviewTable, cx + DPIX(98), y, DPIX(92), DPIX(22));
+    y += DPIX(22) + DPIX(8);
 
     ED_ROW(c->hTypeLbl, c->hType, has, 24);
     ED_ROW(c->hLabelLbl, c->hLabel, show_label, 24);
@@ -1588,6 +1616,68 @@ static void ed_fill_batch_combo(EditorCtx *c)
     SendMessageW(c->hBatchSrc, CB_SETCURSEL, (WPARAM)sel, 0);
 }
 
+/* 表格格式按变量名展开；保存前已有重名检查，这里保留每个可引用变量供插入。 */
+static void ed_fill_table_combo(EditorCtx *c)
+{
+    Segment *s;
+    int i = 0;
+    SendMessageW(c->hTableInsert, CB_RESETCONTENT, 0, 0);
+    for (s = c->t->segments; s; s = s->next) {
+        if (s->type == SEG_STATIC || !s->label[0]) continue;
+        SendMessageW(c->hTableInsert, CB_ADDSTRING, 0, (LPARAM)s->label);
+        SendMessageW(c->hTableInsert, CB_SETITEMDATA, (WPARAM)i, (LPARAM)s);
+        ++i;
+    }
+    SendMessageW(c->hTableInsert, CB_SETCURSEL, 0, 0);
+}
+
+static void ed_commit_table(EditorCtx *c)
+{
+    wchar_t format[QP_OUTPUT_MAX];
+    c->t->table_output_enabled =
+        SendMessageW(c->hTableOutput, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    qp_get_text(c->hTableFmt, format, QP_OUTPUT_MAX);
+    qp_strlcpy(c->t->table_output_format, format, QP_OUTPUT_MAX);
+}
+
+/* 开关只控制表格作者工具；关闭时预览必须立即回到普通文本。 */
+static void ed_sync_table(EditorCtx *c)
+{
+    int on = SendMessageW(c->hTableOutput, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    EnableWindow(c->hTableFmtLbl, on);
+    EnableWindow(c->hTableFmt, on);
+    EnableWindow(c->hTableInsert, on);
+    EnableWindow(c->hTableInsertBtn, on);
+    EnableWindow(c->hPreviewTable, on);
+    if (!on) {
+        c->previewMode = OUTPUT_TEXT;
+        SendMessageW(c->hPreviewText, BM_SETCHECK, BST_CHECKED, 0);
+        SendMessageW(c->hPreviewTable, BM_SETCHECK, BST_UNCHECKED, 0);
+    }
+    if (c->loading) return;
+    ed_commit_table(c);
+    ed_update_preview(c);
+}
+
+static void ed_table_format_changed(EditorCtx *c)
+{
+    if (c->loading) return;
+    ed_commit_table(c);                 /* 先写 working clone，再刷新预览 */
+    ed_update_preview(c);
+}
+
+static void ed_insert_table_variable(EditorCtx *c)
+{
+    const Segment *s = combo_selected_seg(c->hTableInsert);
+    wchar_t text[QP_LABEL_MAX + 3];
+    if (!s || !s->label[0]) return;
+    _snwprintf(text, QP_LABEL_MAX + 3, L"{%ls}", s->label);
+    text[QP_LABEL_MAX + 2] = L'\0';
+    SendMessageW(c->hTableFmt, EM_REPLACESEL, TRUE, (LPARAM)text);
+    ed_table_format_changed(c);
+    SetFocus(c->hTableFmt);
+}
+
 static void ed_load_props(EditorCtx *c)
 {
     Segment *s = ed_cur_seg(c);
@@ -1621,6 +1711,7 @@ static void ed_load_props(EditorCtx *c)
     ed_update_fmt_sample(c);
     ed_fill_ref_combo(c);
     ed_fill_batch_combo(c);          /* 变量增删 / 改类型后，源下拉随之刷新 */
+    ed_fill_table_combo(c);          /* 变量改名、增删或改类型后，插入列表同步 */
     ed_load_ref_params(c);
     ed_fill_optlist(c);
     ed_fill_rulelists(c);
@@ -2241,6 +2332,18 @@ static LRESULT CALLBACK editor_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         props = c->hPropsHost;
         c->hPropTitle = mk_label(props, L"片段属性", 0);
         SendMessageW(c->hPropTitle, WM_SETFONT, (WPARAM)g_fontBold, TRUE);
+        c->hTableOutput = mk_check(props, L"启用表格输出", IDC_ED_TABLE_OUTPUT);
+        c->hTableFmtLbl = mk_label_r(props, L"表格格式：", 0);
+        c->hTableFmt = mk_edit(props, IDC_ED_TABLE_FORMAT,
+                               ES_MULTILINE | ES_WANTRETURN | ES_AUTOVSCROLL | WS_VSCROLL);
+        c->hTableInsert = mk_combo(props, IDC_ED_TABLE_INSERT);
+        c->hTableInsertBtn = mk_btn(props, L"插入", IDC_ED_TABLE_INSERT_BTN);
+        c->hPreviewText = qp_create(L"Button", L"文本预览",
+                                    BS_AUTORADIOBUTTON | WS_GROUP | WS_TABSTOP, 0,
+                                    0, 0, 10, 10, props, IDC_ED_PREVIEW_TEXT);
+        c->hPreviewTable = qp_create(L"Button", L"表格预览",
+                                     BS_AUTORADIOBUTTON | WS_TABSTOP, 0,
+                                     0, 0, 10, 10, props, IDC_ED_PREVIEW_TABLE);
         c->hTypeLbl = mk_label_r(props, L"类型：", 0);
         c->hType = mk_combo(props, IDC_ED_SEG_TYPE);
         SendMessageW(c->hType, CB_ADDSTRING, 0, (LPARAM)L"固定文本");
@@ -2326,11 +2429,17 @@ static LRESULT CALLBACK editor_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         ed_fill_groups(c);
         SendMessageW(c->hBatch, BM_SETCHECK,
                      c->t->batch_mode ? BST_CHECKED : BST_UNCHECKED, 0);
+        SendMessageW(c->hTableOutput, BM_SETCHECK,
+                     c->t->table_output_enabled ? BST_CHECKED : BST_UNCHECKED, 0);
+        SetWindowTextW(c->hTableFmt, c->t->table_output_format);
+        c->previewMode = OUTPUT_TEXT;
+        SendMessageW(c->hPreviewText, BM_SETCHECK, BST_CHECKED, 0);
         c->cur = seg_list_count(c->t->segments) > 0 ? 0 : -1;
         ed_layout(c);
         ed_fill_seglist(c, c->cur < 0 ? 0 : c->cur);
         ed_load_props(c);            /* 内部 ed_fill_batch_combo 选中当前源 */
         ed_sync_batch(c);            /* 按开关状态启用 / 禁用源下拉（loading 中不回写） */
+        ed_sync_table(c);            /* 按表格开关启用格式与表格预览（loading 中不回写） */
         ed_update_preview(c);
         qp_theme_children(hwnd);
         c->loading = 0;
@@ -2530,6 +2639,28 @@ static LRESULT CALLBACK editor_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         case IDC_ED_BATCH_SRC:
             if (code == CBN_SELCHANGE) ed_sync_batch(c);
             return 0;
+        case IDC_ED_TABLE_OUTPUT:
+            if (code == BN_CLICKED) ed_sync_table(c);
+            return 0;
+        case IDC_ED_TABLE_FORMAT:
+            if (code == EN_CHANGE) ed_table_format_changed(c);
+            return 0;
+        case IDC_ED_TABLE_INSERT_BTN:
+            if (code == BN_CLICKED) ed_insert_table_variable(c);
+            return 0;
+        case IDC_ED_PREVIEW_TEXT:
+            if (code == BN_CLICKED && !c->loading) {
+                c->previewMode = OUTPUT_TEXT;
+                ed_update_preview(c);
+            }
+            return 0;
+        case IDC_ED_PREVIEW_TABLE:
+            if (code == BN_CLICKED && !c->loading &&
+                c->t->table_output_enabled) {
+                c->previewMode = OUTPUT_TABLE;
+                ed_update_preview(c);
+            }
+            return 0;
         case IDC_ED_SEG_FORMAT:
             /* 下拉里选一个（SELCHANGE）或自己敲（EDITCHANGE），两条路都算改格式 */
             if (code == CBN_SELCHANGE || code == CBN_EDITCHANGE) {
@@ -2580,6 +2711,7 @@ static LRESULT CALLBACK editor_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 return 0;
             }
             ed_commit_props(c);
+            ed_commit_table(c);
             /* 变量重名拦下来：规则和引用都是靠变量名认人的，两个同名变量在下拉里
                长得一模一样，指错了也看不出来（引擎按 id 找不到时还会退回按名字找，
                只会命中第一个）。改一个名字比事后排查便宜得多。 */
