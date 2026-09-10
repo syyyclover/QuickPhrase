@@ -3287,7 +3287,7 @@ static LRESULT CALLBACK main_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                                         WS_TABSTOP, 0,
                                         0, 0, 10, 10, hwnd, IDC_PREVIEW_MODE_TABLE);
         g_hPreview = qp_create(L"Edit", L"",
-                               ES_MULTILINE | ES_READONLY | WS_VSCROLL | ES_AUTOVSCROLL,
+                               ES_MULTILINE | ES_READONLY | WS_VSCROLL | ES_AUTOVSCROLL | WS_GROUP,
                                WS_EX_CLIENTEDGE, 0, 0, 10, 10, hwnd, IDC_PREVIEW);
         SendMessageW(g_hPreview, WM_SETFONT, (WPARAM)g_fontMono, TRUE);
 
