@@ -2129,6 +2129,17 @@ static void lint_add(LintIssue *out, int *n, LintKind kind,
     ++(*n);
 }
 
+static int lint_label_match_count(const Template *t, const wchar_t *label)
+{
+    const Segment *s;
+    int count = 0;
+    if (!t || !label || !label[0]) return 0;
+    for (s = t->segments; s; s = s->next)
+        if (s->label[0] && qp_icmp(s->label, label) == 0)
+            ++count;
+    return count;
+}
+
 int tmpl_lint(const Template *t, LintIssue *out, int cap)
 {
     const Segment *s;
@@ -2272,6 +2283,41 @@ int tmpl_lint(const Template *t, LintIssue *out, int cap)
                      L"多行粘贴只有文本变量装得下。", seg_display_name(bs));
             lint_add(out, &n, LINT_BATCH_SOURCE,
                      seg_list_index_of(t->segments, bs), -1, msg);
+        }
+    }
+
+    /* 表格格式按变量名取值，重名时不像其它引用能用 id 消歧，必须提醒。 */
+    if (t->table_output_enabled && n < cap) {
+        wchar_t msg[QP_RESULT_MAX];
+        if (!t->table_output_format[0]) {
+            swprintf(msg, QP_RESULT_MAX,
+                     L"已启用「表格输出」，但表格格式为空，无法生成表格。");
+            lint_add(out, &n, LINT_PLACEHOLDER, -1, -1, msg);
+        } else {
+            wchar_t ph[QP_LABEL_MAX];
+            int k;
+            for (k = 0; n < cap &&
+                        qp_placeholder_at(t->table_output_format, k, ph, QP_LABEL_MAX); ++k) {
+                int matches = lint_label_match_count(t, ph);
+                if (matches == 1) continue;
+                if (matches == 0) {
+                    swprintf(msg, QP_RESULT_MAX,
+                             L"表格格式中的占位符「{%ls}」找不到对应的变量，"
+                             L"生成时会原样输出这几个字。", ph);
+                } else {
+                    swprintf(msg, QP_RESULT_MAX,
+                             L"表格格式中的占位符「{%ls}」匹配到 %d 个同名变量，"
+                             L"名称不唯一，无法确定取值。", ph, matches);
+                }
+                lint_add(out, &n, LINT_PLACEHOLDER, -1, -1, msg);
+            }
+            if (n < cap && !wcsstr(t->table_output_format, L"\\t") &&
+                !wcschr(t->table_output_format, L'\t')) {
+                swprintf(msg, QP_RESULT_MAX,
+                         L"已启用「表格输出」，但表格格式没有分列符（\\t 或实际 Tab），"
+                         L"不会形成多列。");
+                lint_add(out, &n, LINT_PLACEHOLDER, -1, -1, msg);
+            }
         }
     }
 

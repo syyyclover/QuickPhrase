@@ -450,6 +450,10 @@ static cJSON *template_to_json(const Template *t)
         cJSON_AddBoolToObject(o, "batchMode", 1);
         json_add_w(o, "batchSourceId", t->batch_source_id);
     }
+    if (t->table_output_enabled)
+        cJSON_AddBoolToObject(o, "tableOutputEnabled", 1);
+    if (t->table_output_format[0])
+        json_add_w(o, "tableOutputFormat", t->table_output_format);
     json_add_w(o, "createdAt", t->created_at);
     json_add_w(o, "updatedAt", t->updated_at);
     arr = cJSON_AddArrayToObject(o, "segments");
@@ -653,6 +657,8 @@ static Template *template_from_json(const cJSON *o)
     json_get_w(o, "groupId", t->group_id, QP_ID_MAX);
     t->batch_mode = json_get_int(o, "batchMode", 0) ? 1 : 0;
     json_get_w(o, "batchSourceId", t->batch_source_id, QP_ID_MAX);
+    t->table_output_enabled = json_get_int(o, "tableOutputEnabled", 0) ? 1 : 0;
+    json_get_w(o, "tableOutputFormat", t->table_output_format, QP_OUTPUT_MAX);
     json_get_w(o, "createdAt", t->created_at, QP_TIME_MAX);
     json_get_w(o, "updatedAt", t->updated_at, QP_TIME_MAX);
     if (!t->created_at[0]) qp_now_iso(t->created_at, QP_TIME_MAX);
