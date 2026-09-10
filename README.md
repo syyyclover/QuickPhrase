@@ -23,7 +23,7 @@
 命令行开关：
 
 ```
-QuickPhrase.exe            启动后驻留托盘（首次运行会显示主界面）
+QuickPhrase.exe            启动并显示主界面
 QuickPhrase.exe --show     启动并显示主界面（快捷方式用的就是这个）
 QuickPhrase.exe --tray     强制静默驻留托盘（开机启动项用的就是这个）
 

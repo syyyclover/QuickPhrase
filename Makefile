@@ -29,8 +29,9 @@ LDFLAGS   := -mwindows -s -static -Wl,--gc-sections -ffunction-sections -fdata-s
 LIBS      := -luser32 -lgdi32 -lcomctl32 -lshell32 -ladvapi32 -lcomdlg32 \
              -luxtheme -lole32 -loleaut32 -luuid -ldwmapi
 
-APP_SRC   := src/main.c src/ui.c src/ui_dialogs.c src/engine.c src/storage.c src/cJSON.c
-APP_HDR   := src/app.h src/ui.h src/engine.h src/storage.h src/resource.h
+APP_SRC   := src/main.c src/ui.c src/ui_dialogs.c src/engine.c src/storage.c src/cJSON.c \
+             src/launch.c
+APP_HDR   := src/app.h src/ui.h src/engine.h src/storage.h src/resource.h src/launch.h
 APP_EXE   := $(BUILD)/QuickPhrase.exe
 UNI_EXE   := $(BUILD)/uninstall.exe
 
@@ -86,8 +87,11 @@ test: dirs
 	    tests/test_engine.c src/engine.c
 	$(HOSTCC) -std=gnu11 -O1 -g -Wall -Isrc -o $(BUILD)/test_storage \
 	    tests/test_storage.c src/engine.c src/storage.c src/cJSON.c
+	$(HOSTCC) -std=gnu11 -O1 -g -Wall -Isrc -o $(BUILD)/test_launch \
+	    tests/test_launch.c src/launch.c
 	@$(BUILD)/test_engine
 	@$(BUILD)/test_storage
+	@$(BUILD)/test_launch
 
 size:
 	@echo "--------------------------------------------"

@@ -2,6 +2,7 @@
  * main.c —— 程序入口：单实例、托盘图标、全局热键、主题、数据加载与保存
  */
 #include "ui.h"
+#include "launch.h"
 #include "resource.h"
 
 #include <shellapi.h>
@@ -338,11 +339,6 @@ int app_set_autostart(int enable)
 /* 入口                                                                */
 /* ================================================================== */
 
-static int cmdline_has(const wchar_t *cmd, const wchar_t *flag)
-{
-    return cmd && flag && qp_istr(cmd, flag) != NULL;
-}
-
 static void init_dpi(void)
 {
     HDC hdc = GetDC(NULL);
@@ -358,7 +354,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, LPWSTR lpCmdLine, int nSho
     INITCOMMONCONTROLSEX icc;
     MSG msg;
     int created = 0;
-    int want_show, force_tray;
+    int show_main;
 
     (void)hPrev;
     (void)nShow;
@@ -421,22 +417,12 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, LPWSTR lpCmdLine, int nSho
         app_tray_tip(L"全局热键未生效",
                      L"设定的组合键已被其他程序占用，可在「选项」里换一个。");
 
-    force_tray = cmdline_has(lpCmdLine, L"--tray") || cmdline_has(lpCmdLine, L"/tray");
-    want_show = cmdline_has(lpCmdLine, L"--show") || cmdline_has(lpCmdLine, L"/show");
-    if (!force_tray && (want_show || created)) {
+    show_main = qp_should_show_main(lpCmdLine);
+    if (show_main)
         app_show_main();
-        if (created)
-            app_tray_tip(QP_APP_TITLE,
-                         L"已内置两个示例模板，可直接使用或在「编辑模板」中修改。");
-    } else {
-        /* 按设计常驻托盘：首次这样启动时提示一次，避免用户以为没启动 */
-        if (!g_settings.minimize_to_tray_hint) {
-            g_settings.minimize_to_tray_hint = 1;
-            app_save_settings();
-            app_tray_tip(QP_APP_TITLE,
-                         L"已在后台运行：双击托盘图标或按全局热键即可唤出。");
-        }
-    }
+    if (created && show_main)
+        app_tray_tip(QP_APP_TITLE,
+                     L"已内置两个示例模板，可直接使用或在「编辑模板」中修改。");
 
     while (GetMessageW(&msg, NULL, 0, 0) > 0) {
         if (g_hwndMain && (msg.hwnd == g_hwndMain || IsChild(g_hwndMain, msg.hwnd))) {
