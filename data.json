@@ -1978,36 +1978,6 @@
 							"keyword":	"的",
 							"markerAfter":	"",
 							"targetSegmentId":	"seg_6aa0fe8d_ee"
-						}, {
-							"id":	"pr_inspect_prefix_board",
-							"type":	"contains",
-							"keyword":	"单板",
-							"fillValue":	"单板",
-							"targetSegmentId":	"seg_inspect_desc_prefix"
-						}, {
-							"id":	"pr_inspect_prefix_fan",
-							"type":	"contains",
-							"keyword":	"风扇",
-							"fillValue":	"风扇",
-							"targetSegmentId":	"seg_inspect_desc_prefix"
-						}, {
-							"id":	"pr_inspect_prefix_because",
-							"type":	"contains",
-							"keyword":	"因",
-							"fillValue":	"因",
-							"targetSegmentId":	"seg_inspect_desc_prefix"
-						}, {
-							"id":	"pr_inspect_prefix_card",
-							"type":	"contains",
-							"keyword":	"板卡",
-							"fillValue":	"板卡",
-							"targetSegmentId":	"seg_inspect_desc_prefix"
-						}, {
-							"id":	"pr_inspect_prefix_port",
-							"type":	"contains",
-							"keyword":	"的",
-							"fillValue":	"的",
-							"targetSegmentId":	"seg_inspect_desc_prefix"
 						}]
 				}, {
 					"id":	"seg_inspect_desc_prefix",
@@ -2015,7 +1985,78 @@
 					"label":	"描述起始词",
 					"defaultValue":	"",
 					"hidden":	true,
-					"noOutput":	true
+					"noOutput":	true,
+					"conditionRules":	[{
+							"id":	"cr_inspect_prefix_fan_data",
+							"join":	"all",
+							"conditions":	[{
+									"triggerSegmentId":	"seg_6aa0df67_dd",
+									"operator":	"contains",
+									"matchValue":	"经核查",
+									"negate":	true
+								}, {
+									"triggerSegmentId":	"seg_inspect_device_tail",
+									"operator":	"contains",
+									"matchValue":	"风扇"
+								}],
+							"resultValue":	"风扇"
+						}, {
+							"id":	"cr_inspect_prefix_because_data",
+							"join":	"all",
+							"conditions":	[{
+									"triggerSegmentId":	"seg_6aa0df67_dd",
+									"operator":	"contains",
+									"matchValue":	"经核查",
+									"negate":	true
+								}, {
+									"triggerSegmentId":	"seg_inspect_device_tail",
+									"operator":	"contains",
+									"matchValue":	"因"
+							}],
+							"resultValue":	"因"
+						}, {
+							"id":	"cr_inspect_prefix_board_data",
+							"join":	"all",
+							"conditions":	[{
+									"triggerSegmentId":	"seg_6aa0df67_dd",
+									"operator":	"contains",
+									"matchValue":	"经核查",
+									"negate":	true
+								}, {
+									"triggerSegmentId":	"seg_inspect_device_tail",
+									"operator":	"contains",
+									"matchValue":	"单板"
+								}],
+							"resultValue":	"单板"
+						}, {
+							"id":	"cr_inspect_prefix_card_data",
+							"join":	"all",
+							"conditions":	[{
+									"triggerSegmentId":	"seg_6aa0df67_dd",
+									"operator":	"contains",
+									"matchValue":	"经核查",
+									"negate":	true
+								}, {
+									"triggerSegmentId":	"seg_inspect_device_tail",
+									"operator":	"contains",
+									"matchValue":	"板卡"
+								}],
+							"resultValue":	"板卡"
+						}, {
+							"id":	"cr_inspect_prefix_port_data",
+							"join":	"all",
+							"conditions":	[{
+									"triggerSegmentId":	"seg_6aa0df67_dd",
+									"operator":	"contains",
+									"matchValue":	"经核查",
+									"negate":	true
+								}, {
+									"triggerSegmentId":	"seg_inspect_device_tail",
+									"operator":	"contains",
+									"matchValue":	"的"
+								}],
+							"resultValue":	"的"
+						}]
 				}, {
 					"id":	"seg_inspect_pool_second",
 					"type":	"text",
