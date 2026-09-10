@@ -1660,6 +1660,7 @@ static void ed_change_type(EditorCtx *c)
     s->type = (SegmentType)sel;
     if (s->type == SEG_STATIC) {
         s->hidden = 0;                    /* 固定句本来就不出现在填写界面 */
+        s->no_output = 0;                 /* 固定句必须重新参与输出 */
         s->ref_segment_id[0] = L'\0';     /* 固定句没有「值」，引用无从谈起 */
     }
     if (s->type != SEG_TEXT) s->multiline = 0;  /* 多行只对文本输入有意义 */
