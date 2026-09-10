@@ -29,9 +29,11 @@
 
 static HWND g_hTree, g_hSearch, g_hTitle, g_hHost, g_hPreview;
 static HWND g_hBtnCopy, g_hBtnReset, g_hBtnEdit, g_hHint, g_hPreviewLabel;
+static HWND g_hPreviewTextMode, g_hPreviewTableMode;
 
 static Template   *g_curTmpl;      /* 当前选中的模板（指向 g_app 中的对象） */
 static EvalContext *g_ctx;         /* 当前模板的求值上下文                  */
+static OutputMode   g_previewMode = OUTPUT_TEXT;
 
 /* 填写区一行的度量（都随 DPI 缩放） */
 #define QP_ROW_CTL_H   DPIX(24)     /* 普通控件高度       */
@@ -2283,28 +2285,104 @@ static void ui_sync_controls(void)
     --g_syncFields;
 }
 
+/* 表格配置不完整时绝不把主窗口留在一个渲染为空的表格模式。这个函数没有
+   UI 或全局状态依赖，供本地宿主测试直接执行。 */
+static OutputMode ui_effective_output_mode(OutputMode requested, int table_enabled,
+                                           const wchar_t *table_format)
+{
+    if (requested != OUTPUT_TABLE || !table_enabled || !table_format || !table_format[0])
+        return OUTPUT_TEXT;
+    return OUTPUT_TABLE;
+}
+
+static int ui_table_output_enabled(void)
+{
+    return g_curTmpl && g_curTmpl->table_output_enabled;
+}
+
+static int ui_table_mode_available(void)
+{
+    return ui_table_output_enabled() && g_curTmpl->table_output_format[0];
+}
+
+static void ui_update_preview_mode_labels(void)
+{
+    int table = g_previewMode == OUTPUT_TABLE;
+    if (g_hPreviewLabel)
+        SetWindowTextW(g_hPreviewLabel, table ? L"口径预览（表格）" : L"口径预览（文本）");
+    if (g_hBtnCopy)
+        SetWindowTextW(g_hBtnCopy, table ? L"一键复制表格" : L"一键复制文本");
+}
+
+static void ui_sync_preview_mode_controls(void)
+{
+    int has_template = g_curTmpl != NULL;
+    int table_enabled = ui_table_output_enabled();
+    int table_available = ui_table_mode_available();
+
+    g_previewMode = ui_effective_output_mode(g_previewMode, table_enabled,
+                                             g_curTmpl ? g_curTmpl->table_output_format : L"");
+    if (g_hPreviewTextMode) {
+        SendMessageW(g_hPreviewTextMode, BM_SETCHECK,
+                     g_previewMode == OUTPUT_TEXT ? BST_CHECKED : BST_UNCHECKED, 0);
+        EnableWindow(g_hPreviewTextMode, has_template);
+    }
+    if (g_hPreviewTableMode) {
+        SendMessageW(g_hPreviewTableMode, BM_SETCHECK,
+                     g_previewMode == OUTPUT_TABLE ? BST_CHECKED : BST_UNCHECKED, 0);
+        EnableWindow(g_hPreviewTableMode, table_available);
+    }
+    ui_update_preview_mode_labels();
+}
+
+static void ui_set_preview_hint(void)
+{
+    if (!g_hHint || !g_ctx) return;
+    if (g_previewMode == OUTPUT_TABLE) {
+        qp_set_text_if_diff(g_hHint, L"表格模式：复制后可直接粘贴到 Excel（Ctrl+Enter）");
+    } else if (g_fieldCount == 0) {
+        qp_set_text_if_diff(g_hHint, L"文本模式：无需填写，Ctrl+Enter 可直接复制");
+    } else {
+        qp_set_text_if_diff(g_hHint, L"文本模式：填写后自动套用规则，Ctrl+Enter 可直接复制");
+    }
+}
+
+/* 预览与复制只走这一条最终渲染路径，避免批量开关或输出模式让两处内容分叉。 */
+static size_t ui_render_current(wchar_t *out, size_t cap)
+{
+    OutputMode mode;
+    if (out && cap) out[0] = L'\0';
+    if (!g_ctx) return 0;
+
+    mode = ui_effective_output_mode(g_previewMode, ui_table_output_enabled(),
+                                    g_curTmpl ? g_curTmpl->table_output_format : L"");
+    g_previewMode = mode;
+    eval_run(g_ctx);
+    if (g_ctx->tmpl && g_ctx->tmpl->batch_mode)
+        return eval_render_batch_mode(g_ctx, mode, out, cap);
+    return eval_render_mode(g_ctx, mode, out, cap);
+}
+
 void ui_refresh_current(void)
 {
     wchar_t out[QP_OUTPUT_MAX];
     if (!g_ctx) {
+        ui_sync_preview_mode_controls();
         if (g_hPreview) SetWindowTextW(g_hPreview, L"");
         return;
     }
-    eval_run(g_ctx);
+    ui_sync_preview_mode_controls();
+    ui_render_current(out, QP_OUTPUT_MAX);
     ui_sync_controls();
-    if (g_ctx->tmpl && g_ctx->tmpl->batch_mode)
-        eval_render_batch(g_ctx, out, QP_OUTPUT_MAX);
-    else
-        eval_render(g_ctx, out, QP_OUTPUT_MAX);
     if (g_hPreview) qp_set_text_if_diff(g_hPreview, out);
     /* 规则互相覆盖、迭代跑满仍没收敛时说一句：否则界面只是安静地拿着中间态，
        人看到的结果说不清是哪一轮的（v2.1 修） */
     if (g_ctx->unstable) {
         qp_set_text_if_diff(g_hHint, L"规则相互覆盖没能稳定，已按最后一轮结果生成");
         g_unstableWarned = 1;
-    } else if (g_unstableWarned) {
+    } else {
         g_unstableWarned = 0;
-        qp_set_text_if_diff(g_hHint, L"填写后自动套用规则，Ctrl+Enter 可直接复制");
+        ui_set_preview_hint();
     }
 }
 
@@ -2314,7 +2392,9 @@ static void ui_select_template(Template *t)
 
     ui_clear_fields();
     sess_deactivate();          /* 顺手把上一份的手填值抄进它自己的快照 */
+    g_previewMode = OUTPUT_TEXT; /* 每次切换模板都回到普通文本，避免状态串模板 */
     g_curTmpl = t;
+    ui_sync_preview_mode_controls();
 
     if (!t) {
         SetWindowTextW(g_hTitle, L"未选择模板");
@@ -2338,12 +2418,6 @@ static void ui_select_template(Template *t)
     /* 切回来时接着上次那一份填，内容都还在 */
     sess_activate(sess_pick_for(t->id), t);
     ui_build_fields();
-    if (g_fieldCount == 0)
-        SetWindowTextW(g_hHint, L"该模板没有需要填写的变量，可直接复制");
-    else if (sess_visible_count() > 1)
-        SetWindowTextW(g_hHint, L"上方标签条可切换同时进行的几份填写（Ctrl+Tab）");
-    else
-        SetWindowTextW(g_hHint, L"填写后自动套用规则，Ctrl+Enter 可直接复制");
     tabs_refresh();
     ui_layout(g_hwndMain);
     ui_refresh_current();
@@ -2745,17 +2819,20 @@ void ui_copy_current(void)
 {
     wchar_t out[QP_OUTPUT_MAX];
     if (!g_ctx) return;
-    if (g_ctx->tmpl && g_ctx->tmpl->batch_mode)
-        eval_render_batch(g_ctx, out, QP_OUTPUT_MAX);
-    else
-        eval_render(g_ctx, out, QP_OUTPUT_MAX);
+    ui_sync_preview_mode_controls();
+    ui_render_current(out, QP_OUTPUT_MAX);
     if (!out[0]) {
-        SetWindowTextW(g_hHint, L"当前口径为空，没有可复制的内容");
+        SetWindowTextW(g_hHint, g_previewMode == OUTPUT_TABLE
+                       ? L"当前表格为空，没有可复制的内容"
+                       : L"当前文本为空，没有可复制的内容");
         return;
     }
     if (qp_copy_to_clipboard(g_hwndMain, out)) {
-        SetWindowTextW(g_hBtnCopy, L"✓ 已复制");
-        SetWindowTextW(g_hHint, L"口径已复制到剪贴板");
+        SetWindowTextW(g_hBtnCopy, g_previewMode == OUTPUT_TABLE
+                       ? L"✓ 已复制表格" : L"✓ 已复制文本");
+        SetWindowTextW(g_hHint, g_previewMode == OUTPUT_TABLE
+                       ? L"表格已复制到剪贴板，可直接粘贴到 Excel"
+                       : L"文本已复制到剪贴板");
         SetTimer(g_hwndMain, TIMER_COPY_FEEDBACK, 1200, NULL);
     } else {
         SetWindowTextW(g_hHint, L"复制失败：剪贴板被其他程序占用");
@@ -2958,6 +3035,7 @@ static void ui_layout(HWND hwnd)
     int m = DPIX(8), searchH = DPIX(24), gap = DPIX(6);
     int treeW, rx, rw, y, previewH, btnH = DPIX(28), btnW = DPIX(104);
     int W, H, hostTop, hostH, sx, sy, tabsH, tabsTop, dirty;
+    int previewLabelW = DPIX(96), modeW = DPIX(62);
 
     if (!hwnd || !g_hTree) return;
     GetClientRect(hwnd, &rc);
@@ -2985,7 +3063,7 @@ static void ui_layout(HWND hwnd)
 
     /* 一次性提交所有位置变化：逐个 MoveWindow 会让每个控件各自重绘一次，
        拖动边框时看起来就是控件一个个错位跟上，很不流畅。 */
-    dwp = BeginDeferWindowPos(13);
+    dwp = BeginDeferWindowPos(15);
     dwp = qp_defer(dwp, g_hSearch, m, m, treeW, searchH);
     dwp = qp_defer(dwp, g_hTree, m, m + searchH + gap, treeW,
                    H - m * 2 - searchH - gap);
@@ -2997,7 +3075,11 @@ static void ui_layout(HWND hwnd)
                    rw - btnW * 3 - DPIX(20), DPIX(18));
     y -= gap + previewH;
     dwp = qp_defer(dwp, g_hPreview, rx, y, rw, previewH);
-    dwp = qp_defer(dwp, g_hPreviewLabel, rx, y - DPIX(18), rw, DPIX(16));
+    dwp = qp_defer(dwp, g_hPreviewLabel, rx, y - DPIX(18), previewLabelW, DPIX(16));
+    dwp = qp_defer(dwp, g_hPreviewTextMode, rx + previewLabelW, y - DPIX(20),
+                   modeW, DPIX(18));
+    dwp = qp_defer(dwp, g_hPreviewTableMode, rx + previewLabelW + modeW, y - DPIX(20),
+                   modeW, DPIX(18));
     dwp = qp_defer(dwp, g_hHost, rx, hostTop, rw, hostH);
     if (tabsH) dwp = qp_defer(dwp, g_hTabs, rx, tabsTop, rw, tabsH);
     if (dwp) EndDeferWindowPos(dwp);
@@ -3198,12 +3280,18 @@ static LRESULT CALLBACK main_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
         g_hPreviewLabel = qp_create(L"Static", L"口径预览", SS_LEFT, 0,
                                     0, 0, 10, 10, hwnd, IDC_PREVIEW_LABEL);
+        g_hPreviewTextMode = qp_create(L"Button", L"文本", BS_AUTORADIOBUTTON |
+                                       WS_GROUP | WS_TABSTOP, 0,
+                                       0, 0, 10, 10, hwnd, IDC_PREVIEW_MODE_TEXT);
+        g_hPreviewTableMode = qp_create(L"Button", L"表格", BS_AUTORADIOBUTTON |
+                                        WS_TABSTOP, 0,
+                                        0, 0, 10, 10, hwnd, IDC_PREVIEW_MODE_TABLE);
         g_hPreview = qp_create(L"Edit", L"",
                                ES_MULTILINE | ES_READONLY | WS_VSCROLL | ES_AUTOVSCROLL,
                                WS_EX_CLIENTEDGE, 0, 0, 10, 10, hwnd, IDC_PREVIEW);
         SendMessageW(g_hPreview, WM_SETFONT, (WPARAM)g_fontMono, TRUE);
 
-        g_hBtnCopy = qp_create(L"Button", L"一键复制", BS_DEFPUSHBUTTON | WS_TABSTOP, 0,
+        g_hBtnCopy = qp_create(L"Button", L"一键复制文本", BS_DEFPUSHBUTTON | WS_TABSTOP, 0,
                                0, 0, 10, 10, hwnd, IDC_BTN_COPY);
         g_hBtnReset = qp_create(L"Button", L"重置", BS_PUSHBUTTON | WS_TABSTOP, 0,
                                 0, 0, 10, 10, hwnd, IDC_BTN_RESET);
@@ -3243,7 +3331,7 @@ static LRESULT CALLBACK main_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_TIMER:
         if (wp == TIMER_COPY_FEEDBACK) {
             KillTimer(hwnd, TIMER_COPY_FEEDBACK);
-            SetWindowTextW(g_hBtnCopy, L"一键复制");
+            ui_update_preview_mode_labels();
         } else if (wp == TIMER_SAVE_PLACEMENT) {
             KillTimer(hwnd, TIMER_SAVE_PLACEMENT);
             save_placement(hwnd);
@@ -3445,6 +3533,20 @@ static LRESULT CALLBACK main_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         case IDC_BTN_COPY:
         case IDM_COPY:
             ui_copy_current();
+            return 0;
+        case IDC_PREVIEW_MODE_TEXT:
+            if (code == BN_CLICKED) {
+                g_previewMode = OUTPUT_TEXT;
+                ui_sync_preview_mode_controls();
+                ui_refresh_current();
+            }
+            return 0;
+        case IDC_PREVIEW_MODE_TABLE:
+            if (code == BN_CLICKED) {
+                g_previewMode = OUTPUT_TABLE;
+                ui_sync_preview_mode_controls();
+                ui_refresh_current();
+            }
             return 0;
         case IDC_BTN_RESET:
         case IDM_RESET:
