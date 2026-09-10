@@ -1737,13 +1737,16 @@
 			"groupId":	"grp_6a9fc1e9_a3",
 			"createdAt":	"2026-09-08 16:05:45",
 			"updatedAt":	"2026-09-09 14:46:24",
+			"batchMode":	true,
+			"batchSourceId":	"seg_6aa0df67_dd",
+			"tableOutputEnabled":	true,
+			"tableOutputFormat":	"{资源池}-{资源池第二段}-{资源池第三段}-{资源池第四段}\\t{地区}\\t{故障状态}\\t{隐患级别}\\t{隐患归属类型（计算/存储/网络/安全/虚拟层）}\\t{涉及设备}\\t\\t{时间}\\t\\t{问题跟进人}\\t\\t处理中\\t{描述起始词}{问题定位描述}",
 			"segments":	[{
 					"id":	"seg_6aa0df67_dd",
 					"type":	"text",
 					"label":	"巡检数据",
 					"placeholder":	"",
 					"defaultValue":	"",
-					"noOutput":	true,
 					"multiline":	true,
 					"parseRules":	[{
 							"id":	"pr_6aa0e005_e0",
@@ -1774,6 +1777,42 @@
 							"perParagraph":	true,
 							"targetSegmentId":	"seg_6aa0fe8d_ee",
 							"fillValue":	""
+						}, {
+							"id":	"pr_inspect_device_board_data",
+							"type":	"between",
+							"keyword":	"设备",
+							"markerAfter":	"单板",
+							"targetSegmentId":	"seg_6aa0e000_df"
+						}, {
+							"id":	"pr_inspect_device_fan",
+							"type":	"between",
+							"keyword":	"设备",
+							"markerAfter":	"风扇",
+							"targetSegmentId":	"seg_6aa0e000_df"
+						}, {
+							"id":	"pr_inspect_device_because",
+							"type":	"between",
+							"keyword":	"设备",
+							"markerAfter":	"因",
+							"targetSegmentId":	"seg_6aa0e000_df"
+						}, {
+							"id":	"pr_inspect_device_card",
+							"type":	"between",
+							"keyword":	"设备",
+							"markerAfter":	"板卡",
+							"targetSegmentId":	"seg_6aa0e000_df"
+						}, {
+							"id":	"pr_inspect_device_port",
+							"type":	"between",
+							"keyword":	"设备",
+							"markerAfter":	"的",
+							"targetSegmentId":	"seg_6aa0e000_df"
+						}, {
+							"id":	"pr_inspect_device_tail_data",
+							"type":	"between",
+							"keyword":	"设备",
+							"markerAfter":	"",
+							"targetSegmentId":	"seg_inspect_device_tail"
 						}]
 				}, {
 					"id":	"seg_6aa0fbc2_e6",
@@ -1782,19 +1821,21 @@
 					"placeholder":	"",
 					"defaultValue":	"",
 					"hidden":	true,
+					"noOutput":	true,
 					"refSegmentId":	"seg_6aa0e000_df",
-					"refMode":	"substr",
+					"refMode":	"split",
 					"refDelimiter":	"-",
 					"refIndex":	1,
 					"refStart":	1,
-					"refLen":	13
+					"refLen":	0
 				}, {
 					"id":	"seg_6aa0fb0c_e2",
 					"type":	"text",
 					"label":	"地区",
 					"placeholder":	"",
 					"defaultValue":	"",
-					"hidden":	true
+					"hidden":	true,
+					"noOutput":	true
 				}, {
 					"id":	"seg_6aa0ff9e_f3",
 					"type":	"select",
@@ -1803,6 +1844,7 @@
 					"defaultValue":	"",
 					"options":	[],
 					"hidden":	true,
+					"noOutput":	true,
 					"conditionRules":	[{
 							"id":	"cr_6aa0ffa5_f4",
 							"join":	"any",
@@ -1838,7 +1880,8 @@
 					"label":	"涉及设备",
 					"placeholder":	"",
 					"defaultValue":	"",
-					"hidden":	true
+					"hidden":	true,
+					"noOutput":	true
 				}, {
 					"id":	"seg_6aa0fc7b_e7",
 					"type":	"datetime",
@@ -1854,6 +1897,7 @@
 					"defaultValue":	"",
 					"options":	["郑键涛", "梁椿锦"],
 					"hidden":	true,
+					"noOutput":	true,
 					"conditionRules":	[{
 							"id":	"cr_6aa0fded_ea",
 							"join":	"any",
@@ -1890,12 +1934,161 @@
 					"placeholder":	"",
 					"defaultValue":	"",
 					"hidden":	true,
+					"noOutput":	true,
 					"refSegmentId":	"seg_6aa0df67_dd",
 					"refMode":	"whole",
 					"refDelimiter":	"-",
 					"refIndex":	1,
 					"refStart":	1,
 					"refLen":	0
+				}, {
+					"id":	"seg_inspect_device_tail",
+					"type":	"text",
+					"label":	"设备后正文",
+					"defaultValue":	"",
+					"hidden":	true,
+					"noOutput":	true,
+					"parseRules":	[{
+							"id":	"pr_inspect_desc_board",
+							"type":	"between",
+							"keyword":	"单板",
+							"markerAfter":	"",
+							"targetSegmentId":	"seg_6aa0fe8d_ee"
+						}, {
+							"id":	"pr_inspect_desc_fan",
+							"type":	"between",
+							"keyword":	"风扇",
+							"markerAfter":	"",
+							"targetSegmentId":	"seg_6aa0fe8d_ee"
+						}, {
+							"id":	"pr_inspect_desc_because",
+							"type":	"between",
+							"keyword":	"因",
+							"markerAfter":	"",
+							"targetSegmentId":	"seg_6aa0fe8d_ee"
+						}, {
+							"id":	"pr_inspect_desc_card",
+							"type":	"between",
+							"keyword":	"板卡",
+							"markerAfter":	"",
+							"targetSegmentId":	"seg_6aa0fe8d_ee"
+						}, {
+							"id":	"pr_inspect_desc_port",
+							"type":	"between",
+							"keyword":	"的",
+							"markerAfter":	"",
+							"targetSegmentId":	"seg_6aa0fe8d_ee"
+						}, {
+							"id":	"pr_inspect_prefix_board",
+							"type":	"contains",
+							"keyword":	"单板",
+							"fillValue":	"单板",
+							"targetSegmentId":	"seg_inspect_desc_prefix"
+						}, {
+							"id":	"pr_inspect_prefix_fan",
+							"type":	"contains",
+							"keyword":	"风扇",
+							"fillValue":	"风扇",
+							"targetSegmentId":	"seg_inspect_desc_prefix"
+						}, {
+							"id":	"pr_inspect_prefix_because",
+							"type":	"contains",
+							"keyword":	"因",
+							"fillValue":	"因",
+							"targetSegmentId":	"seg_inspect_desc_prefix"
+						}, {
+							"id":	"pr_inspect_prefix_card",
+							"type":	"contains",
+							"keyword":	"板卡",
+							"fillValue":	"板卡",
+							"targetSegmentId":	"seg_inspect_desc_prefix"
+						}, {
+							"id":	"pr_inspect_prefix_port",
+							"type":	"contains",
+							"keyword":	"的",
+							"fillValue":	"的",
+							"targetSegmentId":	"seg_inspect_desc_prefix"
+						}]
+				}, {
+					"id":	"seg_inspect_desc_prefix",
+					"type":	"text",
+					"label":	"描述起始词",
+					"defaultValue":	"",
+					"hidden":	true,
+					"noOutput":	true
+				}, {
+					"id":	"seg_inspect_pool_second",
+					"type":	"text",
+					"label":	"资源池第二段",
+					"defaultValue":	"",
+					"hidden":	true,
+					"noOutput":	true,
+					"refSegmentId":	"seg_6aa0e000_df",
+					"refMode":	"split",
+					"refDelimiter":	"-",
+					"refIndex":	2
+				}, {
+					"id":	"seg_inspect_pool_third",
+					"type":	"text",
+					"label":	"资源池第三段",
+					"defaultValue":	"",
+					"hidden":	true,
+					"noOutput":	true,
+					"refSegmentId":	"seg_6aa0e000_df",
+					"refMode":	"split",
+					"refDelimiter":	"-",
+					"refIndex":	3
+				}, {
+					"id":	"seg_inspect_pool_fourth",
+					"type":	"text",
+					"label":	"资源池第四段",
+					"defaultValue":	"",
+					"hidden":	true,
+					"noOutput":	true,
+					"refSegmentId":	"seg_6aa0e000_df",
+					"refMode":	"split",
+					"refDelimiter":	"-",
+					"refIndex":	4
+				}, {
+					"id":	"seg_inspect_status",
+					"type":	"text",
+					"label":	"故障状态",
+					"defaultValue":	"",
+					"hidden":	true,
+					"noOutput":	true,
+					"conditionRules":	[{
+							"id":	"cr_inspect_alarm",
+							"conditions":	[{"triggerSegmentId": "seg_6aa0fb0c_e2", "operator": "contains", "matchValue": "查看告警信息"}],
+							"resultValue":	"异常"
+						}, {
+							"id":	"cr_inspect_unreachable",
+							"conditions":	[{"triggerSegmentId": "seg_6aa0fb0c_e2", "operator": "empty", "negate": true}],
+							"resultValue":	"不可达"
+						}]
+				}, {
+					"id":	"seg_inspect_level",
+					"type":	"text",
+					"label":	"隐患级别",
+					"defaultValue":	"",
+					"hidden":	true,
+					"noOutput":	true,
+					"conditionRules":	[{
+							"id":	"cr_inspect_level_first",
+							"conditions":	[{"triggerSegmentId": "seg_6aa0df67_dd", "operator": "contains", "matchValue": "一级巡检"}],
+							"resultValue":	"3"
+						}, {
+							"id":	"cr_inspect_level_second",
+							"conditions":	[{"triggerSegmentId": "seg_6aa0df67_dd", "operator": "contains", "matchValue": "二级巡检"}],
+							"resultValue":	"2"
+						}, {
+							"id":	"cr_inspect_level_compute",
+							"conditions":	[{"triggerSegmentId": "seg_6aa0ff9e_f3", "operator": "equals", "matchValue": "计算存储"}],
+							"resultValue":	"1"
+						}, {
+							"id":	"cr_inspect_level_network",
+							"conditions":	[{"triggerSegmentId": "seg_6aa0ff9e_f3", "operator": "equals", "matchValue": "网络"}],
+							"resultValue":	"2"
+						}]
 				}]
 		}]
 }

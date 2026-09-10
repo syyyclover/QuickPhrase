@@ -1042,6 +1042,8 @@
             "updatedAt": "2026-09-10 12:00:00",
             "batchMode": true,
             "batchSourceId": "seg_6aa0df67_dd",
+            "tableOutputEnabled": true,
+            "tableOutputFormat": "{资源池}-{资源池第二段}-{资源池第三段}-{资源池第四段}\\t{地区}\\t{故障状态}\\t{隐患级别}\\t{隐患归属类型（计算/存储/网络/安全/虚拟层）}\\t{涉及设备}\\t\\t{时间}\\t\\t{问题跟进人}\\t\\t处理中\\t{描述起始词}{问题定位描述}",
             "segments": [
                 {
                     "id": "seg_6aa0df67_dd",
@@ -1049,7 +1051,6 @@
                     "label": "巡检数据",
                     "placeholder": "每行粘贴一条巡检说明；设备后接的、单板、风扇、因或板卡",
                     "defaultValue": "",
-                    "noOutput": true,
                     "multiline": true,
                     "parseRules": [
                         {"id": "pr_6aa0e005_e0", "type": "between", "keyword": "设备", "markerAfter": "单板", "targetSegmentId": "seg_6aa0e000_df"},
@@ -1174,21 +1175,6 @@
                         {"id": "cr_inspect_level_second", "conditions": [{"triggerSegmentId": "seg_6aa0df67_dd", "operator": "contains", "matchValue": "二级巡检"}], "resultValue": "2"},
                         {"id": "cr_inspect_level_compute", "conditions": [{"triggerSegmentId": "seg_6aa0ff9e_f3", "operator": "equals", "matchValue": "计算存储"}], "resultValue": "1"},
                         {"id": "cr_inspect_level_network", "conditions": [{"triggerSegmentId": "seg_6aa0ff9e_f3", "operator": "equals", "matchValue": "网络"}], "resultValue": "2"}
-                    ]
-                },
-                {
-                    "id": "seg_inspect_row", "type": "static", "content": "",
-                    "conditionRules": [
-                        {
-                            "id": "cr_inspect_row_nfv",
-                            "conditions": [{"triggerSegmentId": "seg_6aa0e000_df", "operator": "startsWith", "matchValue": "NFV-"}],
-                            "resultValue": "{资源池}-{资源池第二段}-{资源池第三段}-{资源池第四段}\\t{地区}\\t{故障状态}\\t{隐患级别}\\t{隐患归属类型（计算/存储/网络/安全/虚拟层）}\\t{涉及设备}\\t\\t{时间}\\t\\t{问题跟进人}\\t\\t处理中\\t{描述起始词}{问题定位描述}"
-                        },
-                        {
-                            "id": "cr_inspect_row_other",
-                            "conditions": [{"triggerSegmentId": "seg_6aa0e000_df", "operator": "empty", "negate": true}],
-                            "resultValue": "{涉及设备}\\t{地区}\\t{故障状态}\\t{隐患级别}\\t{隐患归属类型（计算/存储/网络/安全/虚拟层）}\\t{涉及设备}\\t\\t{时间}\\t\\t{问题跟进人}\\t\\t处理中\\t{描述起始词}{问题定位描述}"
-                        }
                     ]
                 }
             ]
