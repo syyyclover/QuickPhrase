@@ -1814,9 +1814,13 @@ size_t eval_render_batch_mode(EvalContext *ctx, OutputMode mode,
             eval_set_user_value(ctx, src, line);
             eval_run(ctx);
             eval_render_mode(ctx, mode, row, QP_OUTPUT_MAX);
-            if (!first) used = append_n(out, cap, used, L"\n", 1);
-            used = append_n(out, cap, used, row, wcslen(row));
-            first = 0;
+            /* 表格格式未启用、格式为空或本行展开为空时，不把它算成一行，
+               否则第二个空行会凭空留下一个换行符。普通文本保持原有行为。 */
+            if (mode != OUTPUT_TABLE || row[0]) {
+                if (!first) used = append_n(out, cap, used, L"\n", 1);
+                used = append_n(out, cap, used, row, wcslen(row));
+                first = 0;
+            }
         }
         if (!nl) break;
         p = nl + 1;
