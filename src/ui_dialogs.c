@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <assert.h>
 #include <shellapi.h>
 #include <shlobj.h>
 
@@ -985,7 +986,9 @@ typedef struct {
     HWND hAddStatic, hAddText, hAddSelect, hAddMulti, hAddTime;
     HWND hSegDel, hSegUp, hSegDown;
 
-    HWND hPropTitle;
+    HWND hPropsHost, hPropTitle;
+    int propsScroll;             /* 属性区的垂直滚动位置 */
+    int propsWheelDelta;
     HWND hTypeLbl, hType;
     HWND hLabelLbl, hLabel;
     HWND hContentLbl, hContent;
@@ -1010,14 +1013,26 @@ typedef struct {
     int  splitLastY;             /* 上次画出的分隔条位置，-1 = 还没画过 */
 } EditorCtx;
 
+static void ed_layout(EditorCtx *c);
+
 /* ------------------- 编辑器的可变几何（与主窗口同一套做法） -------- */
+
+/* 同一条底边供布局、高度夹取和拖动反算使用。 */
+static int ed_preview_bottom(int H)
+{
+    return H - DPIX(12) - DPIX(26) - DPIX(8);
+}
+
+static int ed_splitter_base(int H)
+{
+    return ed_preview_bottom(H) - DPIX(18) - ED_SPLIT_HIT;
+}
 
 /* 默认值预览的高度区间：上限按「上半部分至少留 DPIX(180)」反推 */
 static void ed_preview_bounds(int H, int *lo, int *hi)
 {
     int minH = DPIX(32);
-    int maxH = H - DPIX(12) - DPIX(26) - DPIX(8) - DPIX(18) - ED_SPLIT_HIT
-                 - DPIX(130) - DPIX(180);
+    int maxH = ed_splitter_base(H) - DPIX(130) - DPIX(180);
     if (maxH < minH) maxH = minH;
     *lo = minH;
     *hi = maxH;
@@ -1037,12 +1052,11 @@ static int ed_preview_height_for(int H)
 /* 预览分隔条的上沿；也就是上半部分（片段列表 / 属性区）的底线 */
 static int ed_splitter_y(int H)
 {
-    return H - DPIX(12) - DPIX(26) - DPIX(8) - ed_preview_height_for(H)
-             - DPIX(18) - ED_SPLIT_HIT;
+    return ed_splitter_base(H) - ed_preview_height_for(H);
 }
 
-/* 片段列表宽度 / 属性区左沿 / 上半部分底线：三处布局共用一份口径 */
-static void ed_metrics(HWND hwnd, int *listw, int *propsx, int *bodybot)
+/* 片段列表宽度 / 属性区左沿；纵向底线由 ed_layout 统一计算。 */
+static void ed_metrics(HWND hwnd, int *listw, int *propsx)
 {
     RECT rc;
     int extra, lw;
@@ -1054,7 +1068,6 @@ static void ed_metrics(HWND hwnd, int *listw, int *propsx, int *bodybot)
     lw = DPIX(332) + extra * 2 / 5;
     if (listw)   *listw = lw;
     if (propsx)  *propsx = DPIX(12) + lw + DPIX(12);
-    if (bodybot) *bodybot = ed_splitter_y(rc.bottom - rc.top);
 }
 
 /* 命中判定：预览分隔条横贯整个宽度 */
@@ -1166,14 +1179,123 @@ static void ed_fill_rulelists(EditorCtx *c)
     }
 }
 
-/* 按当前片段类型显示 / 隐藏并重新排布右侧属性区 */
-static void ed_layout_props(EditorCtx *c)
+static void ed_props_scroll_to(EditorCtx *c, int pos)
+{
+    SCROLLINFO si = {0};
+    int maxpos;
+    si.cbSize = sizeof(si);
+    si.fMask = SIF_ALL;
+    GetScrollInfo(c->hPropsHost, SB_VERT, &si);
+    maxpos = si.nMax - (int)si.nPage + 1;
+    if (maxpos < 0) maxpos = 0;
+    if (pos > maxpos) pos = maxpos;
+    if (pos < 0) pos = 0;
+    if (pos != c->propsScroll) {
+        c->propsScroll = pos;
+        ed_layout(c);
+    }
+}
+
+/* Tab / 程序 SetFocus 到视口外的属性时，把控件滚进视口。 */
+static LRESULT CALLBACK ed_prop_focus_proc(HWND hwnd, UINT msg, WPARAM wp,
+                                          LPARAM lp, UINT_PTR id, DWORD_PTR ref)
+{
+    EditorCtx *c = (EditorCtx *)ref;
+    LRESULT r = DefSubclassProc(hwnd, msg, wp, lp);
+    if (msg == WM_SETFOCUS) {
+        RECT view, ctl;
+        int dy = 0;
+        GetClientRect(c->hPropsHost, &view);
+        GetWindowRect(hwnd, &ctl);
+        MapWindowPoints(NULL, c->hPropsHost, (POINT *)&ctl, 2);
+        if (ctl.bottom > view.bottom) dy = ctl.bottom - view.bottom;
+        if (ctl.top - dy < 0) dy = ctl.top;
+        if (dy) ed_props_scroll_to(c, c->propsScroll + dy);
+    }
+    if (msg == WM_NCDESTROY) RemoveWindowSubclass(hwnd, ed_prop_focus_proc, id);
+    return r;
+}
+
+static BOOL CALLBACK ed_prop_hook_focus(HWND hwnd, LPARAM lp)
+{
+    SetWindowSubclass(hwnd, ed_prop_focus_proc, 0, (DWORD_PTR)lp);
+    return TRUE;
+}
+
+/* 与主窗口字段 host 一样：裁剪子控件、处理滚动，通知和主题交回编辑器。 */
+static LRESULT CALLBACK ed_props_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
+{
+    EditorCtx *c = (EditorCtx *)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
+    switch (msg) {
+    case WM_CREATE:
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA,
+                         (LONG_PTR)((CREATESTRUCTW *)lp)->lpCreateParams);
+        return 0;
+    case WM_ERASEBKGND: {
+        RECT rc;
+        GetClientRect(hwnd, &rc);
+        FillRect((HDC)wp, &rc, g_brushBk);
+        return 1;
+    }
+    case WM_VSCROLL:
+        if (c) {
+            SCROLLINFO si = {0};
+            int pos = c->propsScroll;
+            si.cbSize = sizeof(si);
+            si.fMask = SIF_ALL;
+            GetScrollInfo(hwnd, SB_VERT, &si);
+            switch (LOWORD(wp)) {
+            case SB_TOP:           pos = 0; break;
+            case SB_BOTTOM:        pos = si.nMax; break;
+            case SB_LINEUP:        pos -= DPIX(20); break;
+            case SB_LINEDOWN:      pos += DPIX(20); break;
+            case SB_PAGEUP:        pos -= (int)si.nPage; break;
+            case SB_PAGEDOWN:      pos += (int)si.nPage; break;
+            case SB_THUMBTRACK:
+            case SB_THUMBPOSITION: pos = si.nTrackPos; break;
+            default: break;
+            }
+            ed_props_scroll_to(c, pos);
+        }
+        return 0;
+    case WM_MOUSEWHEEL:
+        if (c) {
+            int steps;
+            UINT lines = 3;
+            SystemParametersInfoW(SPI_GETWHEELSCROLLLINES, 0, &lines, 0);
+            c->propsWheelDelta += (short)HIWORD(wp);
+            steps = c->propsWheelDelta / WHEEL_DELTA;
+            c->propsWheelDelta %= WHEEL_DELTA;
+            if (lines == WHEEL_PAGESCROLL) {
+                RECT rc;
+                GetClientRect(hwnd, &rc);
+                ed_props_scroll_to(c, c->propsScroll - steps * rc.bottom);
+            } else {
+                ed_props_scroll_to(c, c->propsScroll - steps * (int)lines * DPIX(20));
+            }
+        }
+        return 0;
+    case WM_COMMAND:
+    case WM_NOTIFY:
+    case WM_CTLCOLORSTATIC:
+    case WM_CTLCOLOREDIT:
+    case WM_CTLCOLORLISTBOX:
+    case WM_CTLCOLORBTN:
+        return SendMessageW(GetParent(hwnd), msg, wp, lp);
+    default:
+        break;
+    }
+    return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+/* host 已被 ed_layout 限定到 [72, bodybot)，这里使用 host 的局部坐标。 */
+static void ed_layout_props(EditorCtx *c, int bodybot)
 {
     Segment *s = ed_cur_seg(c);
     RECT rc;
     HDWP dwp;
-    int m = DPIX(12), x, lw = DPIX(80), bodybot;
-    int cx, cw, y = DPIX(96);      /* 头部多了「批量」一行，属性区顶随之下移 */
+    int x = 0, lw = DPIX(80), viewh = bodybot - DPIX(72);
+    int cx, cw, y = DPIX(24) - c->propsScroll;
     int has = s != NULL;
     int t = has ? (int)s->type : -1;
     int show_label = has && t != SEG_STATIC;
@@ -1191,11 +1313,12 @@ static void ed_layout_props(EditorCtx *c)
     int show_opt = has && (t == SEG_SELECT || t == SEG_MULTI_SELECT);
     int show_parse = has && t == SEG_TEXT;
     int show_cond = has;
-    int right, nblock, blockh;
+    int right, nblock, blockh, contenth, oldScroll = c->propsScroll;
+    SCROLLINFO si = {0};
 
-    GetClientRect(c->hwnd, &rc);
-    ed_metrics(c->hwnd, NULL, &x, &bodybot);
-    right = rc.right - m;
+    if (viewh < 0) viewh = 0;
+    GetClientRect(c->hPropsHost, &rc);
+    right = rc.right;
     cx = x + lw + DPIX(8);
     cw = right - cx;
     if (cw < DPIX(120)) cw = DPIX(120);
@@ -1213,7 +1336,7 @@ static void ed_layout_props(EditorCtx *c)
     } while (0)
 
     ShowWindow(c->hPropTitle, has ? SW_SHOW : SW_HIDE);
-    dwp = qp_defer(dwp, c->hPropTitle, x, DPIX(72), cw + lw, DPIX(18));
+    dwp = qp_defer(dwp, c->hPropTitle, x, -c->propsScroll, right, DPIX(18));
 
     ED_ROW(c->hTypeLbl, c->hType, has, 24);
     ED_ROW(c->hLabelLbl, c->hLabel, show_label, 24);
@@ -1277,13 +1400,12 @@ static void ed_layout_props(EditorCtx *c)
         y += DPIX(24) + DPIX(4);
     }
 
-    /* 选项 / 规则区的列表高度：把属性行占完之后剩下的空间按块数等分 —— 窗口拉高
-       就一起长高，属性行多又碰上大缩放比例时一起压缩，最后一块永远不会伸出
-       属性区底部（bodybot 与左侧片段列表同一条底线） */
+    /* 有余量时等分给列表；不足时保持可操作的最小高度，由 host 裁剪并滚动。 */
     nblock = (show_opt ? 1 : 0) + (show_parse ? 1 : 0) + (show_cond ? 1 : 0);
     blockh = DPIX(92);
     if (nblock > 0) {
-        blockh = (bodybot - y) / nblock - (DPIX(22) + DPIX(4) + DPIX(8));
+        blockh = (viewh - (y + c->propsScroll)) / nblock
+                   - (DPIX(22) + DPIX(4) + DPIX(8));
         if (blockh < DPIX(56)) blockh = DPIX(56);
     }
 
@@ -1320,6 +1442,23 @@ static void ed_layout_props(EditorCtx *c)
 #undef ED_BLOCK
 
     if (dwp) EndDeferWindowPos(dwp);
+
+    contenth = has ? y + c->propsScroll : 0;
+    if (c->propsScroll > contenth - viewh) c->propsScroll = contenth - viewh;
+    if (c->propsScroll < 0) c->propsScroll = 0;
+    si.cbSize = sizeof(si);
+    si.fMask = SIF_RANGE | SIF_PAGE | SIF_POS;
+    si.nMax = contenth > 0 ? contenth - 1 : 0;
+    si.nPage = (UINT)viewh;
+    si.nPos = c->propsScroll;
+    SetScrollInfo(c->hPropsHost, SB_VERT, &si, TRUE);
+    GetClientRect(c->hPropsHost, &rc);
+    /* 滚动条显隐改变宽度、或内容变短夹回滚动位置时，以最终视口再排一次。
+       内容高度不依赖宽度，因此这里最多补排一次。 */
+    if (right != rc.right || oldScroll != c->propsScroll) {
+        ed_layout_props(c, bodybot);
+        return;
+    }
 
     /* 列表列宽随窗口 */
     ListView_SetColumnWidth(c->hOptList, 0, right - x - DPIX(26));
@@ -1485,7 +1624,7 @@ static void ed_load_props(EditorCtx *c)
     ed_load_ref_params(c);
     ed_fill_optlist(c);
     ed_fill_rulelists(c);
-    ed_layout_props(c);
+    ed_layout(c);
     c->loading = 0;
 }
 
@@ -1554,7 +1693,7 @@ static void ed_ref_changed(EditorCtx *c)
         if (s->ref_start < 1) s->ref_start = 1;
     }
     ed_load_ref_params(c);
-    ed_layout_props(c);                  /* 「取法」那一行随之出现 / 收起 */
+    ed_layout(c);                        /* 「取法」那一行随之出现 / 收起 */
     ed_refresh_cur_row(c);
     ed_update_preview(c);
 }
@@ -1566,7 +1705,7 @@ static void ed_ref_mode_changed(EditorCtx *c)
     if (!s || c->loading || sel == CB_ERR) return;
     s->ref_mode = (RefMode)sel;
     ed_load_ref_params(c);
-    ed_layout_props(c);                  /* 两个参数框按取法显隐 */
+    ed_layout(c);                        /* 两个参数框按取法显隐 */
     ed_refresh_cur_row(c);
     ed_update_preview(c);
 }
@@ -1877,7 +2016,7 @@ static void ed_layout(EditorCtx *c)
     RECT rc;
     HDWP dwp;
     int m = DPIX(12), y, lw = DPIX(66);
-    int listx = DPIX(12), listw, bodybot;
+    int listx = DPIX(12), listw, propsx, bodybot;
     int bw, bh = DPIX(24), btnH = DPIX(26), btnY, prevH, prevY;
     int W, H;
 
@@ -1885,13 +2024,20 @@ static void ed_layout(EditorCtx *c)
     W = rc.right - rc.left;
     H = rc.bottom - rc.top;
     if (W <= 0 || H <= 0) return;
-    ed_metrics(c->hwnd, &listw, NULL, &bodybot);
+    ed_metrics(c->hwnd, &listw, &propsx);
 
     /* 纵向全部由客户区高度反推（以前是写死的 546 / 552 / 570 / 624，所以就算
        给了可缩放边框，拉大窗口也只会在下方留一片空白） */
     btnY  = H - m - btnH;
     prevH = ed_preview_height_for(H);
-    prevY = btnY - DPIX(8) - prevH;
+    prevY = ed_preview_bottom(H) - prevH;
+    bodybot = prevY - DPIX(18) - ED_SPLIT_HIT;
+    /* 最小跟踪尺寸以上的窗口必须满足完整几何约束；最小化的零客户区在上面跳过。 */
+    if (H >= DPIX(ED_MIN_H)) {
+        assert(bodybot >= DPIX(130));
+        assert(prevY - DPIX(18) == bodybot + ED_SPLIT_HIT);
+        assert(prevY + prevH <= btnY - DPIX(8));
+    }
 
     dwp = BeginDeferWindowPos(20);
 
@@ -1924,7 +2070,10 @@ static void ed_layout(EditorCtx *c)
     dwp = qp_defer(dwp, c->hSegUp, listx + bw + DPIX(3), y, DPIX(40), bh);
     dwp = qp_defer(dwp, c->hSegDown, listx + bw + DPIX(46), y, DPIX(40), bh);
     y += bh + DPIX(6);
-    dwp = qp_defer(dwp, c->hSegList, listx, y, listw, bodybot - y);
+    dwp = qp_defer(dwp, c->hSegList, listx, y, listw, bodybot > y ? bodybot - y : 0);
+    dwp = qp_defer(dwp, c->hPropsHost, propsx, DPIX(72),
+                   W > propsx + m ? W - propsx - m : 0,
+                   bodybot > DPIX(72) ? bodybot - DPIX(72) : 0);
 
     /* 底部：预览 + 按钮 */
     dwp = qp_defer(dwp, c->hPreviewLbl, m, prevY - DPIX(18), W - m * 2, DPIX(16));
@@ -1937,13 +2086,18 @@ static void ed_layout(EditorCtx *c)
 
     ListView_SetColumnWidth(c->hSegList, 2, listw - DPIX(96) - DPIX(20));
 
-    ed_layout_props(c);
+    ed_layout_props(c, bodybot);
 
-    /* 分隔条挪过位置 → 连同上面让出来的空档攒成一次 WM_PAINT 立刻画完，
-       与主窗口同一做法（见 ui.c 的 ui_layout 尾部注释） */
-    if (c->splitLastY != prevY) {
-        c->splitLastY = prevY;
-        RedrawWindow(c->hwnd, NULL, NULL, RDW_INVALIDATE | RDW_NOERASE | RDW_UPDATENOW);
+    /* 旧、新分隔条及中间腾出的区域一起失效，避免拖动后的残线。 */
+    if (c->splitLastY != bodybot) {
+        RECT band = {m, bodybot, W - m, bodybot + ED_SPLIT_HIT};
+        if (c->splitLastY >= 0) {
+            if (c->splitLastY < band.top) band.top = c->splitLastY;
+            if (c->splitLastY + ED_SPLIT_HIT > band.bottom)
+                band.bottom = c->splitLastY + ED_SPLIT_HIT;
+        }
+        c->splitLastY = bodybot;
+        RedrawWindow(c->hwnd, &band, NULL, RDW_INVALIDATE | RDW_NOERASE | RDW_UPDATENOW);
     }
 }
 
@@ -2042,6 +2196,7 @@ static LRESULT CALLBACK editor_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     switch (msg) {
     case WM_CREATE: {
         CREATESTRUCTW *cs = (CREATESTRUCTW *)lp;
+        HWND props;
         int fi;
         c = (EditorCtx *)cs->lpCreateParams;
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)c);
@@ -2076,78 +2231,86 @@ static LRESULT CALLBACK editor_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         lv_add_col(c->hSegList, 1, L"类型", 64);
         lv_add_col(c->hSegList, 2, L"内容 / 变量", 200);
 
-        /* 右侧属性 */
-        c->hPropTitle = mk_label(hwnd, L"片段属性", 0);
+        /* 右侧属性：一个有独立裁剪边界的子窗口，无需资源 ID。 */
+        ensure_class(L"QuickPhraseEditorProps", ed_props_proc);
+        c->hPropsHost = CreateWindowExW(WS_EX_CONTROLPARENT,
+            L"QuickPhraseEditorProps", L"片段属性",
+            WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
+            0, 0, 0, 0, hwnd, NULL, g_hInst, c);
+        if (!c->hPropsHost) return -1;
+        props = c->hPropsHost;
+        c->hPropTitle = mk_label(props, L"片段属性", 0);
         SendMessageW(c->hPropTitle, WM_SETFONT, (WPARAM)g_fontBold, TRUE);
-        c->hTypeLbl = mk_label_r(hwnd, L"类型：", 0);
-        c->hType = mk_combo(hwnd, IDC_ED_SEG_TYPE);
+        c->hTypeLbl = mk_label_r(props, L"类型：", 0);
+        c->hType = mk_combo(props, IDC_ED_SEG_TYPE);
         SendMessageW(c->hType, CB_ADDSTRING, 0, (LPARAM)L"固定文本");
         SendMessageW(c->hType, CB_ADDSTRING, 0, (LPARAM)L"文本输入");
         SendMessageW(c->hType, CB_ADDSTRING, 0, (LPARAM)L"下拉单选");
         SendMessageW(c->hType, CB_ADDSTRING, 0, (LPARAM)L"下拉多选");
         SendMessageW(c->hType, CB_ADDSTRING, 0, (LPARAM)L"时间日期");
-        c->hLabelLbl = mk_label_r(hwnd, L"变量名：", 0);
-        c->hLabel = mk_edit(hwnd, IDC_ED_SEG_LABEL, 0);
-        c->hContentLbl = mk_label_r(hwnd, L"固定内容：", 0);
-        c->hContent = mk_edit(hwnd, IDC_ED_SEG_CONTENT,
+        c->hLabelLbl = mk_label_r(props, L"变量名：", 0);
+        c->hLabel = mk_edit(props, IDC_ED_SEG_LABEL, 0);
+        c->hContentLbl = mk_label_r(props, L"固定内容：", 0);
+        c->hContent = mk_edit(props, IDC_ED_SEG_CONTENT,
                               ES_MULTILINE | ES_WANTRETURN | ES_AUTOVSCROLL | WS_VSCROLL);
-        c->hHint = mk_label(hwnd,
+        c->hHint = mk_label(props,
                             L"可以写 {变量名} 直接引用其他变量的值；{{ 输出一个 {",
                             IDC_ED_SEG_HINT);
-        c->hPlaceLbl = mk_label_r(hwnd, L"占位提示：", 0);
-        c->hPlace = mk_edit(hwnd, IDC_ED_SEG_PLACE, 0);
-        c->hDefLbl = mk_label_r(hwnd, L"默认值：", 0);
-        c->hDef = mk_edit(hwnd, IDC_ED_SEG_DEFAULT, 0);
-        c->hSepLbl = mk_label_r(hwnd, L"分隔符：", 0);
-        c->hSep = mk_edit(hwnd, IDC_ED_SEG_SEP, 0);
-        c->hFmtLbl = mk_label_r(hwnd, L"时间格式：", 0);
-        c->hFmt = mk_combo_edit(hwnd, IDC_ED_SEG_FORMAT);
+        c->hPlaceLbl = mk_label_r(props, L"占位提示：", 0);
+        c->hPlace = mk_edit(props, IDC_ED_SEG_PLACE, 0);
+        c->hDefLbl = mk_label_r(props, L"默认值：", 0);
+        c->hDef = mk_edit(props, IDC_ED_SEG_DEFAULT, 0);
+        c->hSepLbl = mk_label_r(props, L"分隔符：", 0);
+        c->hSep = mk_edit(props, IDC_ED_SEG_SEP, 0);
+        c->hFmtLbl = mk_label_r(props, L"时间格式：", 0);
+        c->hFmt = mk_combo_edit(props, IDC_ED_SEG_FORMAT);
         SendMessageW(c->hFmt, CB_LIMITTEXT, (WPARAM)(QP_FORMAT_MAX - 1), 0);
         for (fi = 0; fi < qp_time_format_count(); ++fi)
             SendMessageW(c->hFmt, CB_ADDSTRING, 0, (LPARAM)qp_time_format_at(fi));
-        c->hFmtSample = mk_label(hwnd, L"", IDC_ED_SEG_FMT_SAMPLE);
-        c->hHidden = mk_check(hwnd, L"在填写界面隐藏（只由变量匹配 / 默认值填充）",
+        c->hFmtSample = mk_label(props, L"", IDC_ED_SEG_FMT_SAMPLE);
+        c->hHidden = mk_check(props, L"在填写界面隐藏（只由变量匹配 / 默认值填充）",
                               IDC_ED_SEG_HIDDEN);
-        c->hNoOutput = mk_check(hwnd, L"不计入输出（照常参与匹配 / 引用 / 占位符，但不拼进口径）",
+        c->hNoOutput = mk_check(props, L"不计入输出（照常参与匹配 / 引用 / 占位符，但不拼进口径）",
                                 IDC_ED_SEG_NOOUTPUT);
-        c->hMultiline = mk_check(hwnd, L"多行文本框（大段文字，可换行）",
+        c->hMultiline = mk_check(props, L"多行文本框（大段文字，可换行）",
                                  IDC_ED_SEG_MULTILINE);
-        c->hRefLbl = mk_label_r(hwnd, L"引用：", 0);
-        c->hRef = mk_combo(hwnd, IDC_ED_SEG_REF);
-        c->hRefModeLbl = mk_label_r(hwnd, L"取法：", 0);
-        c->hRefMode = mk_combo(hwnd, IDC_ED_SEG_REF_MODE);
+        c->hRefLbl = mk_label_r(props, L"引用：", 0);
+        c->hRef = mk_combo(props, IDC_ED_SEG_REF);
+        c->hRefModeLbl = mk_label_r(props, L"取法：", 0);
+        c->hRefMode = mk_combo(props, IDC_ED_SEG_REF_MODE);
         SendMessageW(c->hRefMode, CB_ADDSTRING, 0, (LPARAM)L"整体");
         SendMessageW(c->hRefMode, CB_ADDSTRING, 0, (LPARAM)L"按分隔符取第 N 段");
         SendMessageW(c->hRefMode, CB_ADDSTRING, 0, (LPARAM)L"从第 N 个字起");
-        c->hRefA = mk_edit(hwnd, IDC_ED_SEG_REF_A, 0);
-        c->hRefB = mk_edit(hwnd, IDC_ED_SEG_REF_B, 0);
+        c->hRefA = mk_edit(props, IDC_ED_SEG_REF_A, 0);
+        c->hRefB = mk_edit(props, IDC_ED_SEG_REF_B, 0);
 
-        c->hOptLbl = mk_label(hwnd, L"选项", 0);
-        c->hOptAdd = mk_btn(hwnd, L"添加", IDC_ED_OPT_ADD);
-        c->hOptEdit = mk_btn(hwnd, L"修改", IDC_ED_OPT_EDIT);
-        c->hOptDel = mk_btn(hwnd, L"删除", IDC_ED_OPT_DEL);
-        c->hOptUp = mk_btn(hwnd, L"↑", IDC_ED_OPT_UP);
-        c->hOptDown = mk_btn(hwnd, L"↓", IDC_ED_OPT_DOWN);
-        c->hOptList = mk_list(hwnd, IDC_ED_OPTLIST, LVS_NOCOLUMNHEADER);
+        c->hOptLbl = mk_label(props, L"选项", 0);
+        c->hOptAdd = mk_btn(props, L"添加", IDC_ED_OPT_ADD);
+        c->hOptEdit = mk_btn(props, L"修改", IDC_ED_OPT_EDIT);
+        c->hOptDel = mk_btn(props, L"删除", IDC_ED_OPT_DEL);
+        c->hOptUp = mk_btn(props, L"↑", IDC_ED_OPT_UP);
+        c->hOptDown = mk_btn(props, L"↓", IDC_ED_OPT_DOWN);
+        c->hOptList = mk_list(props, IDC_ED_OPTLIST, LVS_NOCOLUMNHEADER);
         lv_add_col(c->hOptList, 0, L"选项", 300);
 
-        c->hParseLbl = mk_label(hwnd, L"解析规则（从本输入中提取信息，自动填充其他变量）", 0);
-        c->hParseAdd = mk_btn(hwnd, L"添加", IDC_ED_PARSE_ADD);
-        c->hParseEdit = mk_btn(hwnd, L"修改", IDC_ED_PARSE_EDIT);
-        c->hParseDel = mk_btn(hwnd, L"删除", IDC_ED_PARSE_DEL);
-        c->hParseUp = mk_btn(hwnd, L"↑", IDC_ED_PARSE_UP);
-        c->hParseDown = mk_btn(hwnd, L"↓", IDC_ED_PARSE_DOWN);
-        c->hParseList = mk_list(hwnd, IDC_ED_PARSELIST, LVS_NOCOLUMNHEADER);
+        c->hParseLbl = mk_label(props, L"解析规则（从本输入中提取信息，自动填充其他变量）", 0);
+        c->hParseAdd = mk_btn(props, L"添加", IDC_ED_PARSE_ADD);
+        c->hParseEdit = mk_btn(props, L"修改", IDC_ED_PARSE_EDIT);
+        c->hParseDel = mk_btn(props, L"删除", IDC_ED_PARSE_DEL);
+        c->hParseUp = mk_btn(props, L"↑", IDC_ED_PARSE_UP);
+        c->hParseDown = mk_btn(props, L"↓", IDC_ED_PARSE_DOWN);
+        c->hParseList = mk_list(props, IDC_ED_PARSELIST, LVS_NOCOLUMNHEADER);
         lv_add_col(c->hParseList, 0, L"规则", 300);
 
-        c->hCondLbl = mk_label(hwnd, L"条件规则（按其他变量的值决定本片段输出）", 0);
-        c->hCondAdd = mk_btn(hwnd, L"添加", IDC_ED_COND_ADD);
-        c->hCondEdit = mk_btn(hwnd, L"修改", IDC_ED_COND_EDIT);
-        c->hCondDel = mk_btn(hwnd, L"删除", IDC_ED_COND_DEL);
-        c->hCondUp = mk_btn(hwnd, L"↑", IDC_ED_COND_UP);
-        c->hCondDown = mk_btn(hwnd, L"↓", IDC_ED_COND_DOWN);
-        c->hCondList = mk_list(hwnd, IDC_ED_CONDLIST, LVS_NOCOLUMNHEADER);
+        c->hCondLbl = mk_label(props, L"条件规则（按其他变量的值决定本片段输出）", 0);
+        c->hCondAdd = mk_btn(props, L"添加", IDC_ED_COND_ADD);
+        c->hCondEdit = mk_btn(props, L"修改", IDC_ED_COND_EDIT);
+        c->hCondDel = mk_btn(props, L"删除", IDC_ED_COND_DEL);
+        c->hCondUp = mk_btn(props, L"↑", IDC_ED_COND_UP);
+        c->hCondDown = mk_btn(props, L"↓", IDC_ED_COND_DOWN);
+        c->hCondList = mk_list(props, IDC_ED_CONDLIST, LVS_NOCOLUMNHEADER);
         lv_add_col(c->hCondList, 0, L"规则", 300);
+        EnumChildWindows(c->hPropsHost, ed_prop_hook_focus, (LPARAM)c);
 
         /* 底部 */
         c->hPreviewLbl = mk_label(hwnd, L"默认值预览", 0);
@@ -2305,8 +2468,7 @@ static LRESULT CALLBACK editor_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             H = rc.bottom - rc.top;
             ed_preview_bounds(H, &lo, &hi);
             /* 往上拖 = 预览变高；公式与 ed_splitter_y 互为反函数 */
-            h = H - DPIX(12) - DPIX(26) - DPIX(8) - DPIX(18) - ED_SPLIT_HIT
-                  - (y - c->splitGrabDy);
+            h = ed_splitter_base(H) - (y - c->splitGrabDy);
             if (h < lo) h = lo;
             if (h > hi) h = hi;
             if (h != g_settings.editor_preview_height) {
