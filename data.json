@@ -1894,8 +1894,8 @@
 							"join":	"all",
 							"conditions":	[{
 									"triggerSegmentId":	"seg_6aa0e000_df",
-									"operator":	"contains",
-									"matchValue":	"NFV"
+									"operator":	"startsWith",
+									"matchValue":	"NFV-"
 								}],
 							"resultValue":	"{资源池}-{资源池第二段}-{资源池第三段}-{资源池第四段}"
 						}, {
