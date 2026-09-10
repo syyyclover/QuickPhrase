@@ -1,0 +1,1196 @@
+{
+	"version":	1,
+	"app":	"QuickPhrase",
+	"groups":	[{
+			"id":	"grp_6a8459d1_74",
+			"name":	"管控",
+			"order":	2
+		}, {
+			"id":	"grp_6a9fc1e9_a3",
+			"name":	"每日巡检",
+			"order":	3
+		}],
+	"templates":	[{
+			"id":	"tpl_6a845a90_91",
+			"name":	"日间管控",
+			"groupId":	"grp_6a8459d1_74",
+			"createdAt":	"2026-08-18 21:13:52",
+			"updatedAt":	"2026-08-31 15:25:59",
+			"segments":	[{
+					"id":	"seg_6a845a90_92",
+					"type":	"static",
+					"content":	"【"
+				}, {
+					"id":	"seg_6a845ad8_93",
+					"type":	"datetime",
+					"label":	"变量2",
+					"placeholder":	"",
+					"defaultValue":	"",
+					"timeFormat":	"yyyyMMdd"
+				}, {
+					"id":	"seg_6a845afe_94",
+					"type":	"static",
+					"content":	"网络云"
+				}, {
+					"id":	"seg_6a845b1d_95",
+					"type":	"select",
+					"label":	"变量4",
+					"placeholder":	"",
+					"defaultValue":	"",
+					"options":	[],
+					"hidden":	true,
+					"conditionRules":	[{
+							"id":	"cr_6a845c9c_a7",
+							"join":	"all",
+							"conditions":	[{
+									"triggerSegmentId":	"seg_6a845c64_a5",
+									"operator":	"contains",
+									"matchValue":	"HNZJI"
+								}],
+							"triggerSegmentId":	"seg_6a845c64_a5",
+							"operator":	"contains",
+							"matchValue":	"HNZJI",
+							"resultValue":	"湛江"
+						}, {
+							"id":	"cr_6a845cc8_a9",
+							"join":	"all",
+							"conditions":	[{
+									"triggerSegmentId":	"seg_6a845c64_a5",
+									"operator":	"contains",
+									"matchValue":	"HNGZ"
+								}],
+							"triggerSegmentId":	"seg_6a845c64_a5",
+							"operator":	"contains",
+							"matchValue":	"HNGZ",
+							"resultValue":	"广州"
+						}]
+				}, {
+					"id":	"seg_6a845b23_96",
+					"type":	"select",
+					"label":	"变量5",
+					"placeholder":	"",
+					"defaultValue":	"",
+					"options":	[],
+					"hidden":	true
+				}, {
+					"id":	"seg_6a845b29_97",
+					"type":	"select",
+					"label":	"变量6",
+					"placeholder":	"",
+					"defaultValue":	"",
+					"options":	[],
+					"hidden":	true,
+					"conditionRules":	[{
+							"id":	"cr_6a845d47_ac",
+							"join":	"all",
+							"conditions":	[{
+									"triggerSegmentId":	"seg_6a845c64_a5",
+									"operator":	"contains",
+									"matchValue":	"SRV"
+								}],
+							"triggerSegmentId":	"seg_6a845c64_a5",
+							"operator":	"contains",
+							"matchValue":	"SRV",
+							"resultValue":	"计算"
+						}, {
+							"id":	"cr_6a845d5b_ad",
+							"join":	"all",
+							"conditions":	[{
+									"triggerSegmentId":	"seg_6a845c64_a5",
+									"operator":	"contains",
+									"matchValue":	"DBS"
+								}],
+							"triggerSegmentId":	"seg_6a845c64_a5",
+							"operator":	"contains",
+							"matchValue":	"DBS",
+							"resultValue":	"存储"
+						}]
+				}, {
+					"id":	"seg_6a845b2f_98",
+					"type":	"static",
+					"content":	"服务器"
+				}, {
+					"id":	"seg_6a845b36_99",
+					"type":	"text",
+					"label":	"工程",
+					"placeholder":	"更换硬件",
+					"defaultValue":	""
+				}, {
+					"id":	"seg_6a845b50_9a",
+					"type":	"static",
+					"content":	"】"
+				}, {
+					"id":	"seg_6a845b5b_9b",
+					"type":	"static",
+					"content":	"操作前人员准备工作确认"
+				}, {
+					"id":	"seg_6a845b6f_9c",
+					"type":	"static",
+					"content":	"\r\n操作内容 :"
+				}, {
+					"id":	"seg_6a845bd8_9e",
+					"type":	"static",
+					"content":	"网络云"
+				}, {
+					"id":	"seg_6a845be4_9f",
+					"type":	"select",
+					"label":	"变量13",
+					"placeholder":	"",
+					"defaultValue":	"",
+					"options":	[],
+					"hidden":	true,
+					"refSegmentId":	"seg_6a845b1d_95",
+					"refMode":	"whole",
+					"refDelimiter":	"-",
+					"refIndex":	1,
+					"refStart":	1,
+					"refLen":	0
+				}, {
+					"id":	"seg_6a845c00_a0",
+					"type":	"select",
+					"label":	"变量14",
+					"placeholder":	"",
+					"defaultValue":	"",
+					"options":	[],
+					"hidden":	true,
+					"refSegmentId":	"seg_6a845b23_96",
+					"refMode":	"whole",
+					"refDelimiter":	"-",
+					"refIndex":	1,
+					"refStart":	1,
+					"refLen":	0
+				}, {
+					"id":	"seg_6a845c04_a1",
+					"type":	"select",
+					"label":	"变量15",
+					"placeholder":	"",
+					"defaultValue":	"",
+					"options":	[],
+					"hidden":	true,
+					"refSegmentId":	"seg_6a845b29_97",
+					"refMode":	"whole",
+					"refDelimiter":	"-",
+					"refIndex":	1,
+					"refStart":	1,
+					"refLen":	0
+				}, {
+					"id":	"seg_6a845c0a_a2",
+					"type":	"static",
+					"content":	"服务器"
+				}, {
+					"id":	"seg_6a845c15_a3",
+					"type":	"select",
+					"label":	"变量17",
+					"placeholder":	"",
+					"defaultValue":	"",
+					"options":	[],
+					"hidden":	true,
+					"refSegmentId":	"seg_6a845b36_99",
+					"refMode":	"whole",
+					"refDelimiter":	"-",
+					"refIndex":	1,
+					"refStart":	1,
+					"refLen":	0
+				}, {
+					"id":	"seg_6a845c5a_a4",
+					"type":	"static",
+					"content":	"\r\n操作设备 :\r\n"
+				}, {
+					"id":	"seg_6a845c64_a5",
+					"type":	"text",
+					"label":	"服务器",
+					"placeholder":	"",
+					"defaultValue":	"",
+					"multiline":	true,
+					"parseRules":	[{
+							"id":	"pr_6a845d0a_ab",
+							"type":	"split",
+							"perParagraph":	true,
+							"delimiter":	"-",
+							"segmentIndex":	4,
+							"keyword":	"",
+							"markerAfter":	"",
+							"targetSegmentId":	"seg_6a845b23_96",
+							"fillValue":	""
+						}]
+				}, {
+					"id":	"seg_6a845da3_ae",
+					"type":	"static",
+					"content":	"\r\n\r\n1、请机房随工人员和机房操作人员已到位，备品备件已就绪 : "
+				}, {
+					"id":	"seg_6a845dcf_af",
+					"type":	"text",
+					"label":	"工程师",
+					"placeholder":	"",
+					"defaultValue":	""
+				}, {
+					"id":	"seg_6a846029_ba",
+					"type":	"static",
+					"content":	" "
+				}, {
+					"id":	"seg_6a845de4_b0",
+					"type":	"text",
+					"label":	"随工",
+					"placeholder":	"",
+					"defaultValue":	""
+				}, {
+					"id":	"seg_6a845df6_b1",
+					"type":	"static",
+					"content":	"\r\n2、请远程操作人员虚机迁移、主机隔离等准备工作确认已完成 : "
+				}, {
+					"id":	"seg_6a845e21_b2",
+					"type":	"text",
+					"label":	"新炬管控",
+					"placeholder":	"",
+					"defaultValue":	""
+				}, {
+					"id":	"seg_6a845e3d_b3",
+					"type":	"static",
+					"content":	"\r\n3、请远程保障人员完成并确认告警屏蔽、确认远程监控已到 :"
+				}, {
+					"id":	"seg_6a845ea4_b9",
+					"type":	"text",
+					"label":	"虚层",
+					"placeholder":	"",
+					"defaultValue":	""
+				}, {
+					"id":	"seg_6a845e55_b4",
+					"type":	"static",
+					"content":	"\r\n请远程操作人员确认已完成上述所有准备工作后，回复 :已完成。"
+				}, {
+					"id":	"seg_6a845e73_b7",
+					"type":	"static",
+					"content":	"@"
+				}, {
+					"id":	"seg_6a845e77_b8",
+					"type":	"text",
+					"label":	"远程人员",
+					"placeholder":	"",
+					"defaultValue":	""
+				}, {
+					"id":	"seg_6a847b4e_bd",
+					"type":	"static",
+					"content":	"\r\n\r\n\r\n"
+				}, {
+					"id":	"seg_6a847bab_bf",
+					"type":	"static",
+					"content":	"【"
+				}, {
+					"id":	"seg_6a847bbb_c0",
+					"type":	"text",
+					"label":	"变量33",
+					"placeholder":	"",
+					"defaultValue":	"",
+					"hidden":	true,
+					"refSegmentId":	"seg_6a845ad8_93",
+					"refMode":	"whole",
+					"refDelimiter":	"-",
+					"refIndex":	1,
+					"refStart":	1,
+					"refLen":	0
+				}, {
+					"id":	"seg_6a847bc7_c1",
+					"type":	"static",
+					"content":	"网络云"
+				}, {
+					"id":	"seg_6a847bd4_c2",
+					"type":	"text",
+					"label":	"变量35",
+					"placeholder":	"",
+					"defaultValue":	"",
+					"hidden":	true,
+					"refSegmentId":	"seg_6a845b1d_95",
+					"refMode":	"whole",
+					"refDelimiter":	"-",
+					"refIndex":	1,
+					"refStart":	1,
+					"refLen":	0
+				}, {
+					"id":	"seg_6a847bdc_c3",
+					"type":	"text",
+					"label":	"变量36",
+					"placeholder":	"",
+					"defaultValue":	"",
+					"hidden":	true,
+					"refSegmentId":	"seg_6a845b23_96",
+					"refMode":	"whole",
+					"refDelimiter":	"-",
+					"refIndex":	1,
+					"refStart":	1,
+					"refLen":	0
+				}, {
+					"id":	"seg_6a847be0_c4",
+					"type":	"text",
+					"label":	"变量37",
+					"placeholder":	"",
+					"defaultValue":	"",
+					"hidden":	true,
+					"refSegmentId":	"seg_6a845b29_97",
+					"refMode":	"whole",
+					"refDelimiter":	"-",
+					"refIndex":	1,
+					"refStart":	1,
+					"refLen":	0
+				}, {
+					"id":	"seg_6a847be3_c5",
+					"type":	"static",
+					"content":	"服务器"
+				}, {
+					"id":	"seg_6a847bfc_c6",
+					"type":	"text",
+					"label":	"变量39",
+					"placeholder":	"",
+					"defaultValue":	"",
+					"hidden":	true,
+					"refSegmentId":	"seg_6a845b36_99",
+					"refMode":	"whole",
+					"refDelimiter":	"-",
+					"refIndex":	1,
+					"refStart":	1,
+					"refLen":	0
+				}, {
+					"id":	"seg_6a847c03_c7",
+					"type":	"static",
+					"content":	"】"
+				}, {
+					"id":	"seg_6a847c1e_c8",
+					"type":	"static",
+					"content":	"开始操作"
+				}, {
+					"id":	"seg_6a847c39_c9",
+					"type":	"static",
+					"content":	"\r\n操作内容 :"
+				}, {
+					"id":	"seg_6a847c43_ca",
+					"type":	"static",
+					"content":	"网络云"
+				}, {
+					"id":	"seg_6a847c51_cb",
+					"type":	"text",
+					"label":	"变量44",
+					"placeholder":	"",
+					"defaultValue":	"",
+					"hidden":	true,
+					"refSegmentId":	"seg_6a845b1d_95",
+					"refMode":	"whole",
+					"refDelimiter":	"-",
+					"refIndex":	1,
+					"refStart":	1,
+					"refLen":	0
+				}, {
+					"id":	"seg_6a847c56_cc",
+					"type":	"text",
+					"label":	"变量45",
+					"placeholder":	"",
+					"defaultValue":	"",
+					"hidden":	true,
+					"refSegmentId":	"seg_6a845b23_96",
+					"refMode":	"whole",
+					"refDelimiter":	"-",
+					"refIndex":	1,
+					"refStart":	1,
+					"refLen":	0
+				}, {
+					"id":	"seg_6a847c5a_cd",
+					"type":	"text",
+					"label":	"变量46",
+					"placeholder":	"",
+					"defaultValue":	"",
+					"hidden":	true,
+					"refSegmentId":	"seg_6a845b29_97",
+					"refMode":	"whole",
+					"refDelimiter":	"-",
+					"refIndex":	1,
+					"refStart":	1,
+					"refLen":	0
+				}, {
+					"id":	"seg_6a847c62_ce",
+					"type":	"static",
+					"content":	"服务器"
+				}, {
+					"id":	"seg_6a847c8b_cf",
+					"type":	"text",
+					"label":	"变量48",
+					"placeholder":	"",
+					"defaultValue":	"",
+					"hidden":	true,
+					"refSegmentId":	"seg_6a845b36_99",
+					"refMode":	"whole",
+					"refDelimiter":	"-",
+					"refIndex":	1,
+					"refStart":	1,
+					"refLen":	0
+				}, {
+					"id":	"seg_6a847c98_d0",
+					"type":	"static",
+					"content":	"\r\n操作设备 :\r\n"
+				}, {
+					"id":	"seg_6a847cae_d1",
+					"type":	"text",
+					"label":	"变量50",
+					"placeholder":	"",
+					"defaultValue":	"",
+					"hidden":	true,
+					"refSegmentId":	"seg_6a845c64_a5",
+					"refMode":	"whole",
+					"refDelimiter":	"-",
+					"refIndex":	1,
+					"refStart":	1,
+					"refLen":	0
+				}, {
+					"id":	"seg_6a847d0c_d3",
+					"type":	"static",
+					"content":	"\r\n操作时间 :"
+				}, {
+					"id":	"seg_6a847d3c_d4",
+					"type":	"text",
+					"label":	"变量52",
+					"placeholder":	"",
+					"defaultValue":	"",
+					"hidden":	true,
+					"refSegmentId":	"seg_6a845ad8_93",
+					"refMode":	"whole",
+					"refDelimiter":	"-",
+					"refIndex":	1,
+					"refStart":	1,
+					"refLen":	0
+				}, {
+					"id":	"seg_6a847d66_d5",
+					"type":	"static",
+					"content":	" "
+				}, {
+					"id":	"seg_6a847d6c_d6",
+					"type":	"text",
+					"label":	"具体时间",
+					"placeholder":	"9:00-18:00",
+					"defaultValue":	"9:00-18:00"
+				}, {
+					"id":	"seg_6a847db7_d8",
+					"type":	"static",
+					"content":	"\r\n局方负责人 :"
+				}, {
+					"id":	"seg_6a847dc2_d9",
+					"type":	"text",
+					"label":	"局方",
+					"placeholder":	"",
+					"defaultValue":	"",
+					"hidden":	true,
+					"conditionRules":	[{
+							"id":	"cr_6a847f1d_e6",
+							"join":	"all",
+							"conditions":	[{
+									"triggerSegmentId":	"seg_6a845c64_a5",
+									"operator":	"contains",
+									"matchValue":	"HNZJI"
+								}],
+							"triggerSegmentId":	"seg_6a845c64_a5",
+							"operator":	"contains",
+							"matchValue":	"HNZJI",
+							"resultValue":	"陈剑晃 13702721030"
+						}, {
+							"id":	"cr_6a847f41_e7",
+							"join":	"all",
+							"conditions":	[{
+									"triggerSegmentId":	"seg_6a845c64_a5",
+									"operator":	"contains",
+									"matchValue":	"HNGZ"
+								}],
+							"triggerSegmentId":	"seg_6a845c64_a5",
+							"operator":	"contains",
+							"matchValue":	"HNGZ",
+							"resultValue":	"王金宇 13802881654"
+						}]
+				}, {
+					"id":	"seg_6a847dea_da",
+					"type":	"static",
+					"content":	"\r\n远程监控负责人员 : "
+				}, {
+					"id":	"seg_6a847df0_db",
+					"type":	"text",
+					"label":	"新炬负责人",
+					"placeholder":	"刘卫 15013128649",
+					"defaultValue":	"刘卫 15013128649",
+					"hidden":	true
+				}, {
+					"id":	"seg_6a847e22_dd",
+					"type":	"static",
+					"content":	"\r\n远程操作人员 :"
+				}, {
+					"id":	"seg_6a847e26_de",
+					"type":	"text",
+					"label":	"变量60",
+					"placeholder":	"",
+					"defaultValue":	"",
+					"hidden":	true,
+					"refSegmentId":	"seg_6a845e21_b2",
+					"refMode":	"whole",
+					"refDelimiter":	"-",
+					"refIndex":	1,
+					"refStart":	1,
+					"refLen":	0
+				}, {
+					"id":	"seg_6a847e31_df",
+					"type":	"static",
+					"content":	"\r\n现场操作人员 :"
+				}, {
+					"id":	"seg_6a847e3e_e0",
+					"type":	"text",
+					"label":	"变量62",
+					"placeholder":	"",
+					"defaultValue":	"",
+					"hidden":	true,
+					"refSegmentId":	"seg_6a845dcf_af",
+					"refMode":	"whole",
+					"refDelimiter":	"-",
+					"refIndex":	1,
+					"refStart":	1,
+					"refLen":	0
+				}, {
+					"id":	"seg_6a847e4d_e1",
+					"type":	"static",
+					"content":	"\r\n现场操作随工配合人员 :"
+				}, {
+					"id":	"seg_6a847e62_e2",
+					"type":	"text",
+					"label":	"变量64",
+					"placeholder":	"",
+					"defaultValue":	"",
+					"hidden":	true,
+					"refSegmentId":	"seg_6a845de4_b0",
+					"refMode":	"whole",
+					"refDelimiter":	"-",
+					"refIndex":	1,
+					"refStart":	1,
+					"refLen":	0
+				}, {
+					"id":	"seg_6a847e67_e3",
+					"type":	"static",
+					"content":	"\r\n远程保障人员（告警监控、状态核查） :"
+				}, {
+					"id":	"seg_6a847e79_e4",
+					"type":	"text",
+					"label":	"变量66",
+					"placeholder":	"",
+					"defaultValue":	"",
+					"hidden":	true,
+					"refSegmentId":	"seg_6a845ea4_b9",
+					"refMode":	"whole",
+					"refDelimiter":	"-",
+					"refIndex":	1,
+					"refStart":	1,
+					"refLen":	0
+				}, {
+					"id":	"seg_6a847e93_e5",
+					"type":	"static",
+					"content":	"\r\n所有准备工作已确认完成，可开始操作。"
+				}, {
+					"id":	"seg_6a847fe5_e8",
+					"type":	"static",
+					"content":	"\r\n\r\n\r\n"
+				}, {
+					"id":	"seg_6a847ff0_e9",
+					"type":	"static",
+					"content":	"【"
+				}, {
+					"id":	"seg_6a848000_ea",
+					"type":	"text",
+					"label":	"变量70",
+					"placeholder":	"",
+					"defaultValue":	"",
+					"hidden":	true,
+					"refSegmentId":	"seg_6a845ad8_93",
+					"refMode":	"whole",
+					"refDelimiter":	"-",
+					"refIndex":	1,
+					"refStart":	1,
+					"refLen":	0
+				}, {
+					"id":	"seg_6a848007_eb",
+					"type":	"static",
+					"content":	"网络云"
+				}, {
+					"id":	"seg_6a848021_ec",
+					"type":	"text",
+					"label":	"变量72",
+					"placeholder":	"",
+					"defaultValue":	"",
+					"hidden":	true,
+					"refSegmentId":	"seg_6a845b1d_95",
+					"refMode":	"whole",
+					"refDelimiter":	"-",
+					"refIndex":	1,
+					"refStart":	1,
+					"refLen":	0
+				}, {
+					"id":	"seg_6a848025_ed",
+					"type":	"text",
+					"label":	"变量73",
+					"placeholder":	"",
+					"defaultValue":	"",
+					"hidden":	true,
+					"refSegmentId":	"seg_6a845b23_96",
+					"refMode":	"whole",
+					"refDelimiter":	"-",
+					"refIndex":	1,
+					"refStart":	1,
+					"refLen":	0
+				}, {
+					"id":	"seg_6a848028_ee",
+					"type":	"text",
+					"label":	"变量74",
+					"placeholder":	"",
+					"defaultValue":	"",
+					"hidden":	true,
+					"refSegmentId":	"seg_6a845b29_97",
+					"refMode":	"whole",
+					"refDelimiter":	"-",
+					"refIndex":	1,
+					"refStart":	1,
+					"refLen":	0
+				}, {
+					"id":	"seg_6a84802b_ef",
+					"type":	"static",
+					"content":	"服务器"
+				}, {
+					"id":	"seg_6a848037_f0",
+					"type":	"text",
+					"label":	"变量76",
+					"placeholder":	"",
+					"defaultValue":	"",
+					"hidden":	true,
+					"refSegmentId":	"seg_6a845b36_99",
+					"refMode":	"whole",
+					"refDelimiter":	"-",
+					"refIndex":	1,
+					"refStart":	1,
+					"refLen":	0
+				}, {
+					"id":	"seg_6a84803b_f1",
+					"type":	"static",
+					"content":	"】"
+				}, {
+					"id":	"seg_6a848049_f2",
+					"type":	"static",
+					"content":	"请确认完成情况\r\n"
+				}, {
+					"id":	"seg_6a848052_f3",
+					"type":	"static",
+					"content":	"1、请现场随工人员确认设备告警灯正常、线缆连接无误。\r\n2、请远程监控负责人员确认故障中心无新增异常告警。\r\n3、请远程监控负责人员确认PIM/VIM无新增异常告警、被屏蔽的告警已清除、被隔离设备已解除隔离。\r\n请远程操作人员统一内部确认已完成上述所有操作后，回复已完成或说明存在问题。"
+				}, {
+					"id":	"seg_6a84810a_f4",
+					"type":	"static",
+					"content":	"\r\n\r\n\r\n自己账号\r\n"
+				}, {
+					"id":	"seg_6a84811f_f5",
+					"type":	"text",
+					"label":	"变量81",
+					"placeholder":	"",
+					"defaultValue":	"",
+					"hidden":	true,
+					"refSegmentId":	"seg_6a845c64_a5",
+					"refMode":	"whole",
+					"refDelimiter":	"-",
+					"refIndex":	1,
+					"refStart":	1,
+					"refLen":	0
+				}, {
+					"id":	"seg_6a84812b_f6",
+					"type":	"static",
+					"content":	"\r\n硬件更换已完成，硬管无异常告警，系统正常访问，烦请核查，若正常，请解除屏蔽、隔离"
+				}, {
+					"id":	"seg_6a848141_f7",
+					"type":	"static",
+					"content":	"@"
+				}, {
+					"id":	"seg_6a848145_f8",
+					"type":	"text",
+					"label":	"变量84",
+					"placeholder":	"",
+					"defaultValue":	"",
+					"hidden":	true,
+					"refSegmentId":	"seg_6a845ea4_b9",
+					"refMode":	"whole",
+					"refDelimiter":	"-",
+					"refIndex":	1,
+					"refStart":	1,
+					"refLen":	0
+				}, {
+					"id":	"seg_6a848192_f9",
+					"type":	"static",
+					"content":	"\r\n\r\n\r\n"
+				}, {
+					"id":	"seg_6a848198_fa",
+					"type":	"static",
+					"content":	"【"
+				}, {
+					"id":	"seg_6a8481a4_fb",
+					"type":	"text",
+					"label":	"变量87",
+					"placeholder":	"",
+					"defaultValue":	"",
+					"hidden":	true,
+					"refSegmentId":	"seg_6a845ad8_93",
+					"refMode":	"whole",
+					"refDelimiter":	"-",
+					"refIndex":	1,
+					"refStart":	1,
+					"refLen":	0
+				}, {
+					"id":	"seg_6a8481c0_fc",
+					"type":	"static",
+					"content":	"网络云"
+				}, {
+					"id":	"seg_6a8481c8_fd",
+					"type":	"text",
+					"label":	"变量89",
+					"placeholder":	"",
+					"defaultValue":	"",
+					"hidden":	true,
+					"refSegmentId":	"seg_6a845b1d_95",
+					"refMode":	"whole",
+					"refDelimiter":	"-",
+					"refIndex":	1,
+					"refStart":	1,
+					"refLen":	0
+				}, {
+					"id":	"seg_6a8481cd_fe",
+					"type":	"text",
+					"label":	"变量90",
+					"placeholder":	"",
+					"defaultValue":	"",
+					"hidden":	true,
+					"refSegmentId":	"seg_6a845b23_96",
+					"refMode":	"whole",
+					"refDelimiter":	"-",
+					"refIndex":	1,
+					"refStart":	1,
+					"refLen":	0
+				}, {
+					"id":	"seg_6a8481d0_ff",
+					"type":	"text",
+					"label":	"变量91",
+					"placeholder":	"",
+					"defaultValue":	"",
+					"hidden":	true,
+					"refSegmentId":	"seg_6a845b29_97",
+					"refMode":	"whole",
+					"refDelimiter":	"-",
+					"refIndex":	1,
+					"refStart":	1,
+					"refLen":	0
+				}, {
+					"id":	"seg_6a8481d5_100",
+					"type":	"static",
+					"content":	"服务器"
+				}, {
+					"id":	"seg_6a8481e0_101",
+					"type":	"text",
+					"label":	"变量93",
+					"placeholder":	"",
+					"defaultValue":	"",
+					"hidden":	true,
+					"refSegmentId":	"seg_6a845b36_99",
+					"refMode":	"whole",
+					"refDelimiter":	"-",
+					"refIndex":	1,
+					"refStart":	1,
+					"refLen":	0
+				}, {
+					"id":	"seg_6a8481e6_102",
+					"type":	"static",
+					"content":	"】已完成操作，遗留问题：\r\n"
+				}, {
+					"id":	"seg_6a848217_104",
+					"type":	"text",
+					"label":	"变量95",
+					"placeholder":	"",
+					"defaultValue":	"",
+					"hidden":	true,
+					"refSegmentId":	"seg_6a845c64_a5",
+					"refMode":	"whole",
+					"refDelimiter":	"-",
+					"refIndex":	1,
+					"refStart":	1,
+					"refLen":	0
+				}, {
+					"id":	"seg_6a84823a_105",
+					"type":	"static",
+					"content":	"\r\n硬件无异常，UID灯常亮，待下次配合虚层排查。"
+				}, {
+					"id":	"seg_6a84824a_106",
+					"type":	"static",
+					"content":	"\r\n操作内容 :"
+				}, {
+					"id":	"seg_6a848271_107",
+					"type":	"static",
+					"content":	"网络云"
+				}, {
+					"id":	"seg_6a848277_108",
+					"type":	"text",
+					"label":	"变量99",
+					"placeholder":	"",
+					"defaultValue":	"",
+					"hidden":	true,
+					"refSegmentId":	"seg_6a845b1d_95",
+					"refMode":	"whole",
+					"refDelimiter":	"-",
+					"refIndex":	1,
+					"refStart":	1,
+					"refLen":	0
+				}, {
+					"id":	"seg_6a84827a_109",
+					"type":	"text",
+					"label":	"变量100",
+					"placeholder":	"",
+					"defaultValue":	"",
+					"hidden":	true,
+					"refSegmentId":	"seg_6a845b23_96",
+					"refMode":	"whole",
+					"refDelimiter":	"-",
+					"refIndex":	1,
+					"refStart":	1,
+					"refLen":	0
+				}, {
+					"id":	"seg_6a84827d_10a",
+					"type":	"text",
+					"label":	"变量101",
+					"placeholder":	"",
+					"defaultValue":	"",
+					"hidden":	true,
+					"refSegmentId":	"seg_6a845b29_97",
+					"refMode":	"whole",
+					"refDelimiter":	"-",
+					"refIndex":	1,
+					"refStart":	1,
+					"refLen":	0
+				}, {
+					"id":	"seg_6a84828b_10b",
+					"type":	"static",
+					"content":	"服务器"
+				}, {
+					"id":	"seg_6a84828e_10c",
+					"type":	"text",
+					"label":	"变量103",
+					"placeholder":	"",
+					"defaultValue":	"",
+					"hidden":	true,
+					"refSegmentId":	"seg_6a845b36_99",
+					"refMode":	"whole",
+					"refDelimiter":	"-",
+					"refIndex":	1,
+					"refStart":	1,
+					"refLen":	0
+				}, {
+					"id":	"seg_6a8482c2_10d",
+					"type":	"static",
+					"content":	"\r\n操作设备 :"
+				}, {
+					"id":	"seg_6a8482c7_10e",
+					"type":	"text",
+					"label":	"变量105",
+					"placeholder":	"",
+					"defaultValue":	"",
+					"hidden":	true,
+					"refSegmentId":	"seg_6a845c64_a5",
+					"refMode":	"whole",
+					"refDelimiter":	"-",
+					"refIndex":	1,
+					"refStart":	1,
+					"refLen":	0
+				}, {
+					"id":	"seg_6a8482d7_10f",
+					"type":	"static",
+					"content":	"\r\n操作时间 :"
+				}, {
+					"id":	"seg_6a8482e4_110",
+					"type":	"text",
+					"label":	"变量107",
+					"placeholder":	"",
+					"defaultValue":	"",
+					"hidden":	true,
+					"refSegmentId":	"seg_6a845ad8_93",
+					"refMode":	"whole",
+					"refDelimiter":	"-",
+					"refIndex":	1,
+					"refStart":	1,
+					"refLen":	0
+				}, {
+					"id":	"seg_6a8482ff_111",
+					"type":	"static",
+					"content":	"  "
+				}, {
+					"id":	"seg_6a848301_112",
+					"type":	"text",
+					"label":	"变量109",
+					"placeholder":	"",
+					"defaultValue":	"",
+					"hidden":	true,
+					"refSegmentId":	"seg_6a847d6c_d6",
+					"refMode":	"whole",
+					"refDelimiter":	"-",
+					"refIndex":	1,
+					"refStart":	1,
+					"refLen":	0
+				}, {
+					"id":	"seg_6a84835c_113",
+					"type":	"static",
+					"content":	"\r\n局方负责人 :"
+				}, {
+					"id":	"seg_6a84835d_114",
+					"type":	"text",
+					"label":	"变量111",
+					"placeholder":	"",
+					"defaultValue":	"",
+					"hidden":	true,
+					"refSegmentId":	"seg_6a847dc2_d9",
+					"refMode":	"whole",
+					"refDelimiter":	"-",
+					"refIndex":	1,
+					"refStart":	1,
+					"refLen":	0
+				}, {
+					"id":	"seg_6a84836e_115",
+					"type":	"static",
+					"content":	"\r\n远程监控负责人员 :"
+				}, {
+					"id":	"seg_6a848372_116",
+					"type":	"text",
+					"label":	"变量113",
+					"placeholder":	"",
+					"defaultValue":	"",
+					"hidden":	true,
+					"refSegmentId":	"seg_6a847df0_db",
+					"refMode":	"whole",
+					"refDelimiter":	"-",
+					"refIndex":	1,
+					"refStart":	1,
+					"refLen":	0
+				}, {
+					"id":	"seg_6a848377_117",
+					"type":	"static",
+					"content":	"\r\n远程操作人员 : "
+				}, {
+					"id":	"seg_6a848381_118",
+					"type":	"text",
+					"label":	"变量115",
+					"placeholder":	"",
+					"defaultValue":	"",
+					"hidden":	true,
+					"refSegmentId":	"seg_6a845e21_b2",
+					"refMode":	"whole",
+					"refDelimiter":	"-",
+					"refIndex":	1,
+					"refStart":	1,
+					"refLen":	0
+				}, {
+					"id":	"seg_6a848385_119",
+					"type":	"static",
+					"content":	"\r\n现场操作人员 : "
+				}, {
+					"id":	"seg_6a84838c_11a",
+					"type":	"text",
+					"label":	"变量117",
+					"placeholder":	"",
+					"defaultValue":	"",
+					"hidden":	true,
+					"refSegmentId":	"seg_6a845dcf_af",
+					"refMode":	"whole",
+					"refDelimiter":	"-",
+					"refIndex":	1,
+					"refStart":	1,
+					"refLen":	0
+				}, {
+					"id":	"seg_6a848391_11b",
+					"type":	"static",
+					"content":	"\r\n现场操作随工配合人员 :"
+				}, {
+					"id":	"seg_6a84839e_11c",
+					"type":	"text",
+					"label":	"变量119",
+					"placeholder":	"",
+					"defaultValue":	"",
+					"hidden":	true,
+					"refSegmentId":	"seg_6a845de4_b0",
+					"refMode":	"whole",
+					"refDelimiter":	"-",
+					"refIndex":	1,
+					"refStart":	1,
+					"refLen":	0
+				}, {
+					"id":	"seg_6a8483a5_11d",
+					"type":	"static",
+					"content":	"\r\n远程保障人员（告警监控、状态核查） :"
+				}, {
+					"id":	"seg_6a8483ab_11e",
+					"type":	"text",
+					"label":	"变量121",
+					"placeholder":	"",
+					"defaultValue":	"",
+					"hidden":	true,
+					"refSegmentId":	"seg_6a845ea4_b9",
+					"refMode":	"whole",
+					"refDelimiter":	"-",
+					"refIndex":	1,
+					"refStart":	1,
+					"refLen":	0
+				}]
+		}, {
+            "id": "tpl_6a9fc1d9_a1",
+            "name": "巡检",
+            "groupId": "grp_6a9fc1e9_a3",
+            "createdAt": "2026-09-08 16:05:45",
+            "updatedAt": "2026-09-10 12:00:00",
+            "batchMode": true,
+            "batchSourceId": "seg_6aa0df67_dd",
+            "segments": [
+                {
+                    "id": "seg_6aa0df67_dd",
+                    "type": "text",
+                    "label": "巡检数据",
+                    "placeholder": "每行粘贴一条巡检说明；设备后接的、单板、风扇、因或板卡",
+                    "defaultValue": "",
+                    "noOutput": true,
+                    "multiline": true,
+                    "parseRules": [
+                        {"id": "pr_6aa0e005_e0", "type": "between", "keyword": "设备", "markerAfter": "单板", "targetSegmentId": "seg_6aa0e000_df"},
+                        {"id": "pr_inspect_device_fan", "type": "between", "keyword": "设备", "markerAfter": "风扇", "targetSegmentId": "seg_6aa0e000_df"},
+                        {"id": "pr_inspect_device_because", "type": "between", "keyword": "设备", "markerAfter": "因", "targetSegmentId": "seg_6aa0e000_df"},
+                        {"id": "pr_inspect_device_card", "type": "between", "keyword": "设备", "markerAfter": "板卡", "targetSegmentId": "seg_6aa0e000_df"},
+                        {"id": "pr_inspect_device_port", "type": "between", "keyword": "设备", "markerAfter": "的", "targetSegmentId": "seg_6aa0e000_df"},
+                        {"id": "pr_6aa0fb46_e5", "type": "between", "keyword": "、", "markerAfter": "：", "targetSegmentId": "seg_6aa0fb0c_e2"},
+                        {"id": "pr_6aa0ff12_f2", "type": "between", "keyword": "设备", "markerAfter": "", "targetSegmentId": "seg_inspect_device_tail"}
+                    ]
+                },
+                {
+                    "id": "seg_6aa0fbc2_e6", "type": "text", "label": "资源池",
+                    "defaultValue": "", "hidden": true, "noOutput": true,
+                    "refSegmentId": "seg_6aa0e000_df", "refMode": "split", "refDelimiter": "-", "refIndex": 1
+                },
+                {
+                    "id": "seg_6aa0fb0c_e2", "type": "text", "label": "地区",
+                    "defaultValue": "", "hidden": true, "noOutput": true
+                },
+                {
+                    "id": "seg_6aa0ff9e_f3", "type": "select",
+                    "label": "隐患归属类型（计算/存储/网络/安全/虚拟层）",
+                    "defaultValue": "", "options": [], "hidden": true, "noOutput": true,
+                    "conditionRules": [
+                        {
+                            "id": "cr_6aa0ffa5_f4", "join": "any",
+                            "conditions": [
+                                {"triggerSegmentId": "seg_6aa0e000_df", "operator": "contains", "matchValue": "-SRV-"},
+                                {"triggerSegmentId": "seg_6aa0e000_df", "operator": "contains", "matchValue": "-DBS-"}
+                            ],
+                            "resultValue": "计算存储"
+                        },
+                        {
+                            "id": "cr_6aa0ffc2_f5", "join": "all",
+                            "conditions": [
+                                {"triggerSegmentId": "seg_6aa0e000_df", "operator": "empty", "negate": true},
+                                {"triggerSegmentId": "seg_6aa0e000_df", "operator": "contains", "matchValue": "-SRV-", "negate": true},
+                                {"triggerSegmentId": "seg_6aa0e000_df", "operator": "contains", "matchValue": "-DBS-", "negate": true}
+                            ],
+                            "resultValue": "网络"
+                        }
+                    ]
+                },
+                {
+                    "id": "seg_6aa0e000_df", "type": "text", "label": "涉及设备",
+                    "defaultValue": "", "hidden": true, "noOutput": true
+                },
+                {
+                    "id": "seg_6aa0fc7b_e7", "type": "datetime", "label": "时间",
+                    "placeholder": "登记日期，可按需修改", "defaultValue": "",
+                    "timeFormat": "yyyy/M/d", "noOutput": true
+                },
+                {
+                    "id": "seg_6aa0fd04_e8", "type": "select", "label": "问题跟进人",
+                    "defaultValue": "", "options": ["郑键涛", "梁椿锦"], "hidden": true, "noOutput": true,
+                    "conditionRules": [
+                        {
+                            "id": "cr_6aa0fded_ea", "join": "all",
+                            "conditions": [{"triggerSegmentId": "seg_6aa0ff9e_f3", "operator": "equals", "matchValue": "计算存储"}],
+                            "resultValue": "郑键涛"
+                        },
+                        {
+                            "id": "cr_6aa0fe21_eb", "join": "all",
+                            "conditions": [{"triggerSegmentId": "seg_6aa0ff9e_f3", "operator": "equals", "matchValue": "网络"}],
+                            "resultValue": "梁椿锦"
+                        }
+                    ]
+                },
+                {
+                    "id": "seg_6aa0fe8d_ee", "type": "text", "label": "问题定位描述",
+                    "defaultValue": "", "hidden": true, "noOutput": true
+                },
+                {
+                    "id": "seg_inspect_device_tail", "type": "text", "label": "设备后正文",
+                    "defaultValue": "", "hidden": true, "noOutput": true,
+                    "parseRules": [
+                        {"id": "pr_inspect_desc_board", "type": "between", "keyword": "单板", "markerAfter": "", "targetSegmentId": "seg_6aa0fe8d_ee"},
+                        {"id": "pr_inspect_desc_fan", "type": "between", "keyword": "风扇", "markerAfter": "", "targetSegmentId": "seg_6aa0fe8d_ee"},
+                        {"id": "pr_inspect_desc_because", "type": "between", "keyword": "因", "markerAfter": "", "targetSegmentId": "seg_6aa0fe8d_ee"},
+                        {"id": "pr_inspect_desc_card", "type": "between", "keyword": "板卡", "markerAfter": "", "targetSegmentId": "seg_6aa0fe8d_ee"},
+                        {"id": "pr_inspect_desc_port", "type": "between", "keyword": "的", "markerAfter": "", "targetSegmentId": "seg_6aa0fe8d_ee"},
+                        {"id": "pr_inspect_prefix_board", "type": "contains", "keyword": "单板", "fillValue": "单板", "targetSegmentId": "seg_inspect_desc_prefix"},
+                        {"id": "pr_inspect_prefix_fan", "type": "contains", "keyword": "风扇", "fillValue": "风扇", "targetSegmentId": "seg_inspect_desc_prefix"},
+                        {"id": "pr_inspect_prefix_because", "type": "contains", "keyword": "因", "fillValue": "因", "targetSegmentId": "seg_inspect_desc_prefix"},
+                        {"id": "pr_inspect_prefix_card", "type": "contains", "keyword": "板卡", "fillValue": "板卡", "targetSegmentId": "seg_inspect_desc_prefix"},
+                        {"id": "pr_inspect_prefix_port", "type": "contains", "keyword": "的", "fillValue": "的", "targetSegmentId": "seg_inspect_desc_prefix"}
+                    ]
+                },
+                {
+                    "id": "seg_inspect_desc_prefix", "type": "text", "label": "描述起始词",
+                    "defaultValue": "", "hidden": true, "noOutput": true
+                },
+                {
+                    "id": "seg_inspect_pool_second", "type": "text", "label": "资源池第二段",
+                    "defaultValue": "", "hidden": true, "noOutput": true,
+                    "refSegmentId": "seg_6aa0e000_df", "refMode": "split", "refDelimiter": "-", "refIndex": 2
+                },
+                {
+                    "id": "seg_inspect_pool_third", "type": "text", "label": "资源池第三段",
+                    "defaultValue": "", "hidden": true, "noOutput": true,
+                    "refSegmentId": "seg_6aa0e000_df", "refMode": "split", "refDelimiter": "-", "refIndex": 3
+                },
+                {
+                    "id": "seg_inspect_pool_fourth", "type": "text", "label": "资源池第四段",
+                    "defaultValue": "", "hidden": true, "noOutput": true,
+                    "refSegmentId": "seg_6aa0e000_df", "refMode": "split", "refDelimiter": "-", "refIndex": 4
+                },
+                {
+                    "id": "seg_inspect_status", "type": "text", "label": "故障状态",
+                    "defaultValue": "", "hidden": true, "noOutput": true,
+                    "conditionRules": [
+                        {"id": "cr_inspect_alarm", "conditions": [{"triggerSegmentId": "seg_6aa0fb0c_e2", "operator": "contains", "matchValue": "查看告警信息"}], "resultValue": "异常"},
+                        {"id": "cr_inspect_unreachable", "conditions": [{"triggerSegmentId": "seg_6aa0fb0c_e2", "operator": "empty", "negate": true}], "resultValue": "不可达"}
+                    ]
+                },
+                {
+                    "id": "seg_inspect_level", "type": "text", "label": "隐患级别",
+                    "defaultValue": "", "hidden": true, "noOutput": true,
+                    "conditionRules": [
+                        {"id": "cr_inspect_level_first", "conditions": [{"triggerSegmentId": "seg_6aa0df67_dd", "operator": "contains", "matchValue": "一级巡检"}], "resultValue": "3"},
+                        {"id": "cr_inspect_level_second", "conditions": [{"triggerSegmentId": "seg_6aa0df67_dd", "operator": "contains", "matchValue": "二级巡检"}], "resultValue": "2"},
+                        {"id": "cr_inspect_level_compute", "conditions": [{"triggerSegmentId": "seg_6aa0ff9e_f3", "operator": "equals", "matchValue": "计算存储"}], "resultValue": "1"},
+                        {"id": "cr_inspect_level_network", "conditions": [{"triggerSegmentId": "seg_6aa0ff9e_f3", "operator": "equals", "matchValue": "网络"}], "resultValue": "2"}
+                    ]
+                },
+                {
+                    "id": "seg_inspect_row", "type": "static", "content": "",
+                    "conditionRules": [
+                        {
+                            "id": "cr_inspect_row_nfv",
+                            "conditions": [{"triggerSegmentId": "seg_6aa0e000_df", "operator": "startsWith", "matchValue": "NFV-"}],
+                            "resultValue": "{资源池}-{资源池第二段}-{资源池第三段}-{资源池第四段}\\t{地区}\\t{故障状态}\\t{隐患级别}\\t{隐患归属类型（计算/存储/网络/安全/虚拟层）}\\t{涉及设备}\\t\\t{时间}\\t\\t{问题跟进人}\\t\\t处理中\\t{描述起始词}{问题定位描述}"
+                        },
+                        {
+                            "id": "cr_inspect_row_other",
+                            "conditions": [{"triggerSegmentId": "seg_6aa0e000_df", "operator": "empty", "negate": true}],
+                            "resultValue": "{涉及设备}\\t{地区}\\t{故障状态}\\t{隐患级别}\\t{隐患归属类型（计算/存储/网络/安全/虚拟层）}\\t{涉及设备}\\t\\t{时间}\\t\\t{问题跟进人}\\t\\t处理中\\t{描述起始词}{问题定位描述}"
+                        }
+                    ]
+                }
+            ]
+        }]
+}
