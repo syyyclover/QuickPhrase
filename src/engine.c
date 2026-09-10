@@ -928,6 +928,8 @@ Template *tmpl_clone(const Template *t)
     qp_strlcpy(c->group_id, t->group_id, QP_ID_MAX);
     c->batch_mode = t->batch_mode;
     qp_strlcpy(c->batch_source_id, t->batch_source_id, QP_ID_MAX);
+    c->table_output_enabled = t->table_output_enabled;
+    qp_strlcpy(c->table_output_format, t->table_output_format, QP_OUTPUT_MAX);
     qp_strlcpy(c->created_at, t->created_at, QP_TIME_MAX);
     qp_strlcpy(c->updated_at, t->updated_at, QP_TIME_MAX);
     for (s = t->segments; s; s = s->next)
@@ -1550,7 +1552,7 @@ static const wchar_t *eval_placeholder_lookup(void *user, const wchar_t *name)
     if (!p) return NULL;
     at = eval_index_of_id(p->ctx, name);
     if (at < 0 || at == p->self) return NULL;
-    return p->work[at];
+    return p->work ? p->work[at] : p->ctx->fields[at].value;
 }
 
 void eval_run(EvalContext *ctx)
@@ -1725,13 +1727,24 @@ void eval_run(EvalContext *ctx)
     free(ref_cycle);
 }
 
-size_t eval_render(const EvalContext *ctx, wchar_t *out, size_t cap)
+size_t eval_render_mode(EvalContext *ctx, OutputMode mode, wchar_t *out, size_t cap)
 {
     size_t used = 0;
     int i;
     if (!out || cap == 0) return 0;
     out[0] = L'\0';
     if (!ctx) return 0;
+    if (mode == OUTPUT_TABLE) {
+        PlaceholderCtx pc;
+        if (!ctx->tmpl || !ctx->tmpl->table_output_enabled ||
+            !ctx->tmpl->table_output_format[0])
+            return 0;
+        pc.ctx = ctx;
+        pc.work = NULL;
+        pc.self = -1;
+        return qp_expand_placeholders(ctx->tmpl->table_output_format,
+                                      eval_placeholder_lookup, &pc, out, cap);
+    }
     for (i = 0; i < ctx->count; ++i) {
         const wchar_t *v = ctx->fields[i].value;
         size_t len;
@@ -1749,7 +1762,13 @@ size_t eval_render(const EvalContext *ctx, wchar_t *out, size_t cap)
     return used;
 }
 
-size_t eval_render_batch(EvalContext *ctx, wchar_t *out, size_t cap)
+size_t eval_render(const EvalContext *ctx, wchar_t *out, size_t cap)
+{
+    return eval_render_mode((EvalContext *)ctx, OUTPUT_TEXT, out, cap);
+}
+
+size_t eval_render_batch_mode(EvalContext *ctx, OutputMode mode,
+                              wchar_t *out, size_t cap)
 {
     int src, saved_touched, first = 1;
     const wchar_t *srcval, *p, *nl;
@@ -1763,20 +1782,20 @@ size_t eval_render_batch(EvalContext *ctx, wchar_t *out, size_t cap)
 
     /* 没开批量 / 没模板 / 没选源变量 / 源已删除 → 就按普通单次渲染 */
     if (!ctx->tmpl || !ctx->tmpl->batch_mode || !ctx->tmpl->batch_source_id[0])
-        return eval_render(ctx, out, cap);
+        return eval_render_mode(ctx, mode, out, cap);
     src = eval_index_of_id(ctx, ctx->tmpl->batch_source_id);
-    if (src < 0) return eval_render(ctx, out, cap);
+    if (src < 0) return eval_render_mode(ctx, mode, out, cap);
 
     /* 源变量此刻的值：优先取用户手填的整段，否则取生效值 */
     srcval = ctx->fields[src].user_touched ? ctx->fields[src].user_value
                                            : ctx->fields[src].value;
     /* 源为空或只有一行 → 退化为单次渲染，免得边打字边预览时闪空 */
     if (qp_is_blank(srcval) || !wcschr(srcval, L'\n'))
-        return eval_render(ctx, out, cap);
+        return eval_render_mode(ctx, mode, out, cap);
 
     /* row 有 QP_OUTPUT_MAX 那么大，放堆上，别撑爆栈 */
     row = (wchar_t *)malloc(QP_OUTPUT_MAX * sizeof(wchar_t));
-    if (!row) return eval_render(ctx, out, cap);
+    if (!row) return eval_render_mode(ctx, mode, out, cap);
 
     /* 快照源字段，逐行注入后各渲染一遍，最后还原 */
     qp_strlcpy(saved, ctx->fields[src].user_value, QP_VALUE_MAX);
@@ -1794,7 +1813,7 @@ size_t eval_render_batch(EvalContext *ctx, wchar_t *out, size_t cap)
         if (!qp_is_blank(line)) {
             eval_set_user_value(ctx, src, line);
             eval_run(ctx);
-            eval_render(ctx, row, QP_OUTPUT_MAX);
+            eval_render_mode(ctx, mode, row, QP_OUTPUT_MAX);
             if (!first) used = append_n(out, cap, used, L"\n", 1);
             used = append_n(out, cap, used, row, wcslen(row));
             first = 0;
@@ -1815,6 +1834,11 @@ size_t eval_render_batch(EvalContext *ctx, wchar_t *out, size_t cap)
 
     free(row);
     return used;
+}
+
+size_t eval_render_batch(EvalContext *ctx, wchar_t *out, size_t cap)
+{
+    return eval_render_batch_mode(ctx, OUTPUT_TEXT, out, cap);
 }
 
 size_t tmpl_render_defaults(const Template *t, wchar_t *out, size_t cap)

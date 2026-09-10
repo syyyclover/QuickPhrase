@@ -76,6 +76,11 @@ typedef enum {
     COND_JOIN_ANY = 1     /* 任意满足（或） */
 } CondJoin;
 
+typedef enum {
+    OUTPUT_TEXT = 0,
+    OUTPUT_TABLE = 1
+} OutputMode;
+
 /* ------------------------------------------------------------------ */
 /* 解析规则：挂在 text 变量上，从输入值提取信息去填充「目标变量」        */
 /* ------------------------------------------------------------------ */
@@ -159,6 +164,8 @@ typedef struct Template {
     wchar_t group_id[QP_ID_MAX];          /* 空 = 未分组 */
     int     batch_mode;                   /* 1 = 批量：源变量按行重复整模板渲染，各行以换行合并 */
     wchar_t batch_source_id[QP_ID_MAX];   /* 批量的源变量片段 id（空=未选） */
+    int     table_output_enabled;         /* 1 = 启用表格格式输出 */
+    wchar_t table_output_format[QP_OUTPUT_MAX]; /* 表格格式：占位符及转义 */
     Segment *segments;
     wchar_t created_at[QP_TIME_MAX];
     wchar_t updated_at[QP_TIME_MAX];
@@ -360,8 +367,14 @@ int          eval_index_of_label(const EvalContext *ctx, const wchar_t *label);
 void         eval_set_user_value(EvalContext *ctx, int idx, const wchar_t *v);
 /* 执行解析规则 + 条件规则，迭代至稳定 */
 void         eval_run(EvalContext *ctx);
+/* 指定输出格式渲染；表格格式未启用或为空时返回空。 */
+size_t       eval_render_mode(EvalContext *ctx, OutputMode mode,
+                              wchar_t *out, size_t cap);
 /* 拼接输出 */
 size_t       eval_render(const EvalContext *ctx, wchar_t *out, size_t cap);
+/* 指定输出格式的批量渲染；结束后恢复 ctx 的完整源输入。 */
+size_t       eval_render_batch_mode(EvalContext *ctx, OutputMode mode,
+                                    wchar_t *out, size_t cap);
 /* 批量渲染：模板开了 batch_mode 时，把源变量的值按换行拆成多行，逐行注入源变量后
    各渲染一遍，结果以换行合并（常量列不变、源派生列逐行变）。未开批量或源为空时
    等同 eval_render。会临时改动并还原 ctx（结束后 ctx 与整段已粘贴一致）。 */
