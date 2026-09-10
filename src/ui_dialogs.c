@@ -169,6 +169,20 @@ static HWND mk_combo(HWND p, int id)
     return qp_create(L"ComboBox", L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 0,
                      0, 0, 10, DPIX(260), p, id);
 }
+/* 对话框里的单选组由下一个 WS_GROUP 终止；属性区的第一个普通控件另起一组。 */
+static HWND mk_combo_group(HWND p, int id)
+{
+    return qp_create(L"ComboBox", L"",
+                     CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP | WS_GROUP, 0,
+                     0, 0, 10, DPIX(260), p, id);
+}
+static HWND mk_radio(HWND p, const wchar_t *text, int id, int first_in_group)
+{
+    return qp_create(L"Button", text,
+                     BS_AUTORADIOBUTTON | WS_TABSTOP |
+                     (first_in_group ? WS_GROUP : 0), 0,
+                     0, 0, 10, 10, p, id);
+}
 /* 可下拉也可自己敲的组合框（时间格式：预置几个够用的，剩下的让人自己写） */
 static HWND mk_combo_edit(HWND p, int id)
 {
@@ -1620,15 +1634,18 @@ static void ed_fill_batch_combo(EditorCtx *c)
 static void ed_fill_table_combo(EditorCtx *c)
 {
     Segment *s;
-    int i = 0;
+    const Segment *selected = combo_selected_seg(c->hTableInsert);
+    int i = 0, sel = -1;
     SendMessageW(c->hTableInsert, CB_RESETCONTENT, 0, 0);
     for (s = c->t->segments; s; s = s->next) {
         if (s->type == SEG_STATIC || !s->label[0]) continue;
         SendMessageW(c->hTableInsert, CB_ADDSTRING, 0, (LPARAM)s->label);
         SendMessageW(c->hTableInsert, CB_SETITEMDATA, (WPARAM)i, (LPARAM)s);
+        if (s == selected) sel = i;
         ++i;
     }
-    SendMessageW(c->hTableInsert, CB_SETCURSEL, 0, 0);
+    if (sel < 0 && i > 0) sel = 0;
+    if (sel >= 0) SendMessageW(c->hTableInsert, CB_SETCURSEL, (WPARAM)sel, 0);
 }
 
 static void ed_commit_table(EditorCtx *c)
@@ -2338,14 +2355,10 @@ static LRESULT CALLBACK editor_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                                ES_MULTILINE | ES_WANTRETURN | ES_AUTOVSCROLL | WS_VSCROLL);
         c->hTableInsert = mk_combo(props, IDC_ED_TABLE_INSERT);
         c->hTableInsertBtn = mk_btn(props, L"插入", IDC_ED_TABLE_INSERT_BTN);
-        c->hPreviewText = qp_create(L"Button", L"文本预览",
-                                    BS_AUTORADIOBUTTON | WS_GROUP | WS_TABSTOP, 0,
-                                    0, 0, 10, 10, props, IDC_ED_PREVIEW_TEXT);
-        c->hPreviewTable = qp_create(L"Button", L"表格预览",
-                                     BS_AUTORADIOBUTTON | WS_TABSTOP, 0,
-                                     0, 0, 10, 10, props, IDC_ED_PREVIEW_TABLE);
+        c->hPreviewText = mk_radio(props, L"文本预览", IDC_ED_PREVIEW_TEXT, 1);
+        c->hPreviewTable = mk_radio(props, L"表格预览", IDC_ED_PREVIEW_TABLE, 0);
         c->hTypeLbl = mk_label_r(props, L"类型：", 0);
-        c->hType = mk_combo(props, IDC_ED_SEG_TYPE);
+        c->hType = mk_combo_group(props, IDC_ED_SEG_TYPE);
         SendMessageW(c->hType, CB_ADDSTRING, 0, (LPARAM)L"固定文本");
         SendMessageW(c->hType, CB_ADDSTRING, 0, (LPARAM)L"文本输入");
         SendMessageW(c->hType, CB_ADDSTRING, 0, (LPARAM)L"下拉单选");
@@ -2622,6 +2635,7 @@ static LRESULT CALLBACK editor_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         case IDC_ED_SEG_SEP:
             if (code == EN_CHANGE && !c->loading) {
                 ed_commit_props(c);
+                if (id == IDC_ED_SEG_LABEL) ed_fill_table_combo(c);
                 ed_refresh_cur_row(c);
             }
             return 0;
