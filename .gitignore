@@ -30,3 +30,10 @@ desktop.ini
 # 不纳入版本库：单元测试与开发需求文档（本地保留）
 /tests/
 /QuickPhrase.md
+
+
+# 临时文件
+_review_diff.txt
+示例.png
+示例.txt
+示例完整.txt
