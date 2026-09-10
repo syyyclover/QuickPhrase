@@ -1043,7 +1043,7 @@
             "batchMode": true,
             "batchSourceId": "seg_6aa0df67_dd",
             "tableOutputEnabled": true,
-            "tableOutputFormat": "{资源池}-{资源池第二段}-{资源池第三段}-{资源池第四段}\\t{地区}\\t{故障状态}\\t{隐患级别}\\t{隐患归属类型（计算/存储/网络/安全/虚拟层）}\\t{涉及设备}\\t\\t{时间}\\t\\t{问题跟进人}\\t\\t处理中\\t{描述起始词}{问题定位描述}",
+            "tableOutputFormat": "{首列}\\t{地区}\\t{故障状态}\\t{隐患级别}\\t{隐患归属类型（计算/存储/网络/安全/虚拟层）}\\t{涉及设备}\\t\\t{时间}\\t\\t{问题跟进人}\\t\\t处理中\\t{描述起始词}{问题定位描述}",
             "segments": [
                 {
                     "id": "seg_6aa0df67_dd",
@@ -1098,6 +1098,22 @@
                 {
                     "id": "seg_6aa0e000_df", "type": "text", "label": "涉及设备",
                     "defaultValue": "", "hidden": true, "noOutput": true
+                },
+                {
+                    "id": "seg_inspect_first_column", "type": "text", "label": "首列",
+                    "defaultValue": "", "hidden": true, "noOutput": true,
+                    "conditionRules": [
+                        {
+                            "id": "cr_inspect_first_nfv", "join": "all",
+                            "conditions": [{"triggerSegmentId": "seg_6aa0e000_df", "operator": "contains", "matchValue": "NFV"}],
+                            "resultValue": "{资源池}-{资源池第二段}-{资源池第三段}-{资源池第四段}"
+                        },
+                        {
+                            "id": "cr_inspect_first_nonempty", "join": "all",
+                            "conditions": [{"triggerSegmentId": "seg_6aa0e000_df", "operator": "empty", "negate": true}],
+                            "resultValue": "{涉及设备}"
+                        }
+                    ]
                 },
                 {
                     "id": "seg_6aa0fc7b_e7", "type": "datetime", "label": "时间",

@@ -1561,6 +1561,7 @@ void eval_run(EvalContext *ctx)
     wchar_t (*derived)[QP_VALUE_MAX];
     int *derived_set;
     int *parse_set;      /* 本轮该目标已被解析规则占下 */
+    int *condition_set;  /* 本轮该字段由条件规则给值 */
     int *ref_cycle;      /* 该字段的引用链上有环 → 整条不生效 */
     int i, pass, rp;
 
@@ -1570,9 +1571,11 @@ void eval_run(EvalContext *ctx)
     derived = (wchar_t (*)[QP_VALUE_MAX])calloc((size_t)ctx->count, sizeof(*derived));
     derived_set = (int *)calloc((size_t)ctx->count, sizeof(int));
     parse_set = (int *)calloc((size_t)ctx->count, sizeof(int));
+    condition_set = (int *)calloc((size_t)ctx->count, sizeof(int));
     ref_cycle = (int *)calloc((size_t)ctx->count, sizeof(int));
-    if (!work || !derived || !derived_set || !parse_set || !ref_cycle) {
-        free(work); free(derived); free(derived_set); free(parse_set); free(ref_cycle);
+    if (!work || !derived || !derived_set || !parse_set || !condition_set || !ref_cycle) {
+        free(work); free(derived); free(derived_set); free(parse_set);
+        free(condition_set); free(ref_cycle);
         return;
     }
     ctx->unstable = 0;
@@ -1610,6 +1613,7 @@ void eval_run(EvalContext *ctx)
         for (i = 0; i < ctx->count; ++i) {
             derived_set[i] = 0;
             parse_set[i] = 0;
+            condition_set[i] = 0;
             derived[i][0] = L'\0';
         }
 
@@ -1667,6 +1671,7 @@ void eval_run(EvalContext *ctx)
                 if (!cond_rule_hit(ctx, r, work)) continue;
                 qp_strlcpy(derived[i], r->result_value, QP_VALUE_MAX);
                 derived_set[i] = 1;
+                condition_set[i] = 1;
                 break;
             }
         }
@@ -1684,14 +1689,14 @@ void eval_run(EvalContext *ctx)
             } else {
                 qp_strlcpy(next, field_fallback_of(f), QP_VALUE_MAX);
             }
-            /* 固定片段里的 {变量名} 换成那个变量此刻的值，同时把 \t \n \\ 这些
-               转义折出来（列输出靠的就是 \t 分列、\n 分行）。放在这里而不是渲染时，
-               是为了让它跟着不动点一起收敛：被引用的变量本轮才刚被规则推出值，
-               下一轮这里就取得到了。每轮都是从模板原文重新展开一次，所以不会
-               越展开越长。只有固定片段做替换 —— 用户自己敲进文本框的 { 与 \
-               永远是字面量，不会被当成占位符或转义解释。 */
-            if (f->seg && f->seg->type == SEG_STATIC &&
-                (wcschr(next, L'{') || wcschr(next, L'\\'))) {
+            /* 固定片段或本轮命中的条件结果里的 {变量名} 换成那个变量此刻的值，
+               同时把 \t \n \\ 这些转义折出来。放在这里是为了让它跟着不动点一起
+               收敛；每轮都从模板原文 / 规则结果重新展开，所以只替换一层，不会
+               越展开越长。手填、默认、解析与引用拿到的文本仍保持字面量。 */
+            if (f->seg &&
+                ((f->seg->type == SEG_STATIC &&
+                  (wcschr(next, L'{') || wcschr(next, L'\\'))) ||
+                 (condition_set[i] && wcschr(next, L'{')))) {
                 wchar_t expanded[QP_VALUE_MAX];
                 PlaceholderCtx pc;
                 pc.ctx = ctx;
@@ -1724,6 +1729,7 @@ void eval_run(EvalContext *ctx)
     free(derived);
     free(derived_set);
     free(parse_set);
+    free(condition_set);
     free(ref_cycle);
 }
 
