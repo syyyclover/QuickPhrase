@@ -1825,7 +1825,7 @@ size_t tmpl_render_defaults(const Template *t, wchar_t *out, size_t cap)
     if (!t) return 0;
     ctx = eval_create(t);
     if (!ctx) return 0;
-    n = eval_render(ctx, out, cap);
+    n = eval_render_batch(ctx, out, cap);
     eval_destroy(ctx);
     return n;
 }
@@ -1902,34 +1902,43 @@ static const wchar_t *seg_name_by_id(const Template *t, const wchar_t *id)
 
 void parse_rule_summary(const ParseRule *r, const Template *t, wchar_t *out, size_t cap)
 {
+    const wchar_t suffix[] = L"（逐段）";
+    size_t body_cap = cap;
     if (!out || cap == 0) return;
     out[0] = L'\0';
     if (!r) return;
+    /* 为逐段标记预留空间；极小缓冲仍保留终止符，标记按可用空间截断。 */
+    if (r->per_paragraph) {
+        size_t suffix_len = sizeof(suffix) / sizeof(suffix[0]) - 1;
+        body_cap = cap > suffix_len ? cap - suffix_len : 1;
+    }
     if (r->type == PARSE_SPLIT) {
         if (r->keyword[0])
-            swprintf(out, cap, L"按「%ls」分割取第 %d 段，命中「%ls」→ %ls = 「%ls」",
+            swprintf(out, body_cap, L"按「%ls」分割取第 %d 段，命中「%ls」→ %ls = 「%ls」",
                      r->delimiter, r->segment_index, r->keyword,
                      seg_name_by_id(t, r->target_segment_id),
                      r->fill_value[0] ? r->fill_value : L"(提取值)");
         else
-            swprintf(out, cap, L"按「%ls」分割取第 %d 段 → %ls = 「%ls」",
+            swprintf(out, body_cap, L"按「%ls」分割取第 %d 段 → %ls = 「%ls」",
                      r->delimiter, r->segment_index,
                      seg_name_by_id(t, r->target_segment_id),
                      r->fill_value[0] ? r->fill_value : L"(提取值)");
     } else if (r->type == PARSE_BETWEEN) {
-        swprintf(out, cap, L"取「%ls」与「%ls」之间 → %ls = 「%ls」",
+        swprintf(out, body_cap, L"取「%ls」与「%ls」之间 → %ls = 「%ls」",
                  r->keyword[0] ? r->keyword : L"开头",
                  r->marker_after[0] ? r->marker_after : L"末尾",
                  seg_name_by_id(t, r->target_segment_id),
                  r->fill_value[0] ? r->fill_value : L"(提取值)");
     } else {
-        swprintf(out, cap, L"包含「%ls」→ %ls = 「%ls」",
+        swprintf(out, body_cap, L"包含「%ls」→ %ls = 「%ls」",
                  r->keyword, seg_name_by_id(t, r->target_segment_id),
                  r->fill_value[0] ? r->fill_value : L"(关键词)");
     }
+    /* swprintf 截断时不保证写入终止符，任何后续字符串读取前都显式封口。 */
+    out[body_cap - 1] = L'\0';
     if (r->per_paragraph) {
         size_t u = wcslen(out);
-        qp_strlcpy(out + u, L"（逐段）", cap > u ? cap - u : 0);
+        qp_strlcpy(out + u, suffix, cap - u);
     }
 }
 

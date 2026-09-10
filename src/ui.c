@@ -2292,7 +2292,10 @@ void ui_refresh_current(void)
     }
     eval_run(g_ctx);
     ui_sync_controls();
-    eval_render(g_ctx, out, QP_OUTPUT_MAX);
+    if (g_ctx->tmpl && g_ctx->tmpl->batch_mode)
+        eval_render_batch(g_ctx, out, QP_OUTPUT_MAX);
+    else
+        eval_render(g_ctx, out, QP_OUTPUT_MAX);
     if (g_hPreview) qp_set_text_if_diff(g_hPreview, out);
     /* 规则互相覆盖、迭代跑满仍没收敛时说一句：否则界面只是安静地拿着中间态，
        人看到的结果说不清是哪一轮的（v2.1 修） */
@@ -2742,7 +2745,10 @@ void ui_copy_current(void)
 {
     wchar_t out[QP_OUTPUT_MAX];
     if (!g_ctx) return;
-    eval_render(g_ctx, out, QP_OUTPUT_MAX);
+    if (g_ctx->tmpl && g_ctx->tmpl->batch_mode)
+        eval_render_batch(g_ctx, out, QP_OUTPUT_MAX);
+    else
+        eval_render(g_ctx, out, QP_OUTPUT_MAX);
     if (!out[0]) {
         SetWindowTextW(g_hHint, L"当前口径为空，没有可复制的内容");
         return;
