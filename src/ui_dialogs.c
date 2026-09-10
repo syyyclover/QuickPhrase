@@ -355,8 +355,8 @@ typedef struct {
     const Template *tmpl;
     const Segment *owner_seg;
     int result;
-    HWND hType, hDelim, hIndex, hKeyword, hTarget, hFill;
-    HWND hDelimLbl, hIndexLbl;
+    HWND hType, hDelim, hIndex, hKeyword, hMarkerAfter, hTarget, hFill, hPara, hTip;
+    HWND hDelimLbl, hIndexLbl, hKeywordLbl, hMarkerAfterLbl;
 } ParseDlgCtx;
 
 /* 把模板里可作为目标的变量填进下拉框，选中 sel_id */
@@ -390,11 +390,29 @@ static const Segment *combo_selected_seg(HWND combo)
 
 static void parse_dlg_sync_enable(ParseDlgCtx *c)
 {
-    int is_split = (int)SendMessageW(c->hType, CB_GETCURSEL, 0, 0) == 0;
+    int sel = (int)SendMessageW(c->hType, CB_GETCURSEL, 0, 0);
+    int is_split = (sel == 0), is_between = (sel == 2);
+    /* 分隔符 / 第几段：只有「按分隔符切割」用得上 */
     EnableWindow(c->hDelim, is_split);
     EnableWindow(c->hIndex, is_split);
     EnableWindow(c->hDelimLbl, is_split);
     EnableWindow(c->hIndexLbl, is_split);
+    /* 后标记：只有「取两标记之间」用得上 */
+    EnableWindow(c->hMarkerAfter, is_between);
+    EnableWindow(c->hMarkerAfterLbl, is_between);
+    /* 关键词一栏三种规则都有意义：分隔=可选命中词、包含=必填词、取两标记之间=前标记。
+       不禁用，只按类型改标签与提示语。 */
+    SetWindowTextW(c->hKeywordLbl, is_between ? L"前标记：" : L"命中关键词：");
+    SendMessageW(c->hKeyword, EM_SETCUEBANNER, TRUE,
+                 (LPARAM)(is_between ? L"留空表示从头开始取"
+                                     : L"留空表示只要取到内容就算命中"));
+    SetWindowTextW(c->hTip,
+        is_between
+          ? L"例：源里「网络设备」之后、「经核查」之前 → 取出设备名填到目标变量。"
+            L"勾「逐段」可对多段话逐段各取一次、结果分行。"
+        : is_split
+          ? L"例：设备编号按「-」切割取第 8 段，命中「DBS」→ 设备类型 填「存储服务器」。"
+          : L"例：内容里包含「硬件」→ 把目标变量填成指定值。");
 }
 
 static LRESULT CALLBACK parse_dlg_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
@@ -409,8 +427,7 @@ static LRESULT CALLBACK parse_dlg_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
         int m = DPIX(14), lw = DPIX(84), y = DPIX(14), rowh = DPIX(28);
         int cw, cx;
         RECT rc;
-        HWND tip;
-        HWND lbl[6];
+        HWND lbl[7];
         wchar_t buf[32];
 
         c = (ParseDlgCtx *)cs->lpCreateParams;
@@ -424,7 +441,10 @@ static LRESULT CALLBACK parse_dlg_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
         c->hType = mk_combo(hwnd, IDC_RL_TYPE);
         SendMessageW(c->hType, CB_ADDSTRING, 0, (LPARAM)L"按分隔符切割取第 N 段");
         SendMessageW(c->hType, CB_ADDSTRING, 0, (LPARAM)L"包含关键词");
-        SendMessageW(c->hType, CB_SETCURSEL, c->rule->type == PARSE_CONTAINS ? 1 : 0, 0);
+        SendMessageW(c->hType, CB_ADDSTRING, 0, (LPARAM)L"取两标记之间");
+        SendMessageW(c->hType, CB_SETCURSEL,
+                     c->rule->type == PARSE_CONTAINS ? 1 :
+                     c->rule->type == PARSE_BETWEEN ? 2 : 0, 0);
 
         lbl[1] = c->hDelimLbl = mk_label_r(hwnd, L"分隔符：", 0);
         c->hDelim = mk_edit(hwnd, IDC_RL_DELIM, 0);
@@ -435,39 +455,53 @@ static LRESULT CALLBACK parse_dlg_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
         _snwprintf(buf, 32, L"%d", c->rule->segment_index > 0 ? c->rule->segment_index : 1);
         SetWindowTextW(c->hIndex, buf);
 
-        lbl[3] = mk_label_r(hwnd, L"命中关键词：", 0);
+        /* 命中关键词 / 前标记（同一控件，按类型改标签） */
+        lbl[3] = c->hKeywordLbl = mk_label_r(hwnd, L"命中关键词：", 0);
         c->hKeyword = mk_edit(hwnd, IDC_RL_KEYWORD, 0);
         SetWindowTextW(c->hKeyword, c->rule->keyword);
-        SendMessageW(c->hKeyword, EM_SETCUEBANNER, TRUE, (LPARAM)L"留空表示只要取到内容就算命中");
 
-        lbl[4] = mk_label_r(hwnd, L"填充到变量：", 0);
+        /* 后标记：只在「取两标记之间」时可用 */
+        lbl[4] = c->hMarkerAfterLbl = mk_label_r(hwnd, L"后标记：", 0);
+        c->hMarkerAfter = mk_edit(hwnd, IDC_RL_MARKER_AFTER, 0);
+        SetWindowTextW(c->hMarkerAfter, c->rule->marker_after);
+        SendMessageW(c->hMarkerAfter, EM_SETCUEBANNER, TRUE, (LPARAM)L"留空表示取到末尾");
+
+        lbl[5] = mk_label_r(hwnd, L"填充到变量：", 0);
         c->hTarget = mk_combo(hwnd, IDC_RL_TARGET);
         fill_var_combo(c->hTarget, c->tmpl, c->rule->target_segment_id, c->owner_seg, 0);
 
-        lbl[5] = mk_label_r(hwnd, L"填充值：", 0);
+        lbl[6] = mk_label_r(hwnd, L"填充值：", 0);
         c->hFill = mk_edit(hwnd, IDC_RL_FILL, 0);
         SetWindowTextW(c->hFill, c->rule->fill_value);
         SendMessageW(c->hFill, EM_SETCUEBANNER, TRUE, (LPARAM)L"留空表示填入取到的原文");
 
-        tip = mk_label(hwnd, L"例：设备编号按「-」切割取第 8 段，命中「DBS」→ 设备类型 填「存储服务器」。",
-                       IDC_RL_TIP);
+        /* 逐段处理：自带文字，左侧与输入框对齐，对三种规则都可用 */
+        c->hPara = mk_check(hwnd, L"逐段处理：源含多段（换行分隔）时，每段各抽取一次、结果分行",
+                            IDC_RL_PARA);
+        SendMessageW(c->hPara, BM_SETCHECK,
+                     c->rule->per_paragraph ? BST_CHECKED : BST_UNCHECKED, 0);
+
+        c->hTip = mk_label(hwnd, L"", IDC_RL_TIP);
         mk_btn(hwnd, L"确定", IDOK);
         mk_btn(hwnd, L"取消", IDCANCEL);
         SendMessageW(GetDlgItem(hwnd, IDOK), BM_SETSTYLE, BS_DEFPUSHBUTTON, TRUE);
 
         {
-            HWND ctl[6];
+            HWND ctl[7];
             int k;
-            ctl[0] = c->hType;   ctl[1] = c->hDelim;  ctl[2] = c->hIndex;
-            ctl[3] = c->hKeyword; ctl[4] = c->hTarget; ctl[5] = c->hFill;
-            for (k = 0; k < 6; ++k) {
+            ctl[0] = c->hType;    ctl[1] = c->hDelim;       ctl[2] = c->hIndex;
+            ctl[3] = c->hKeyword; ctl[4] = c->hMarkerAfter; ctl[5] = c->hTarget;
+            ctl[6] = c->hFill;
+            for (k = 0; k < 7; ++k) {
                 int iw = (k == 1 || k == 2) ? DPIX(90) : cw;
                 MoveWindow(lbl[k], m, y + DPIX(4), lw, DPIX(18), TRUE);
                 MoveWindow(ctl[k], cx, y, iw, DPIX(24), TRUE);
                 y += rowh;
             }
+            MoveWindow(c->hPara, cx, y, cw, DPIX(22), TRUE);
+            y += rowh;
         }
-        MoveWindow(tip, m, y + DPIX(4), rc.right - m * 2, DPIX(34), TRUE);
+        MoveWindow(c->hTip, m, y + DPIX(4), rc.right - m * 2, DPIX(34), TRUE);
         MoveWindow(GetDlgItem(hwnd, IDOK), rc.right - m - DPIX(180),
                    rc.bottom - m - DPIX(26), DPIX(86), DPIX(26), TRUE);
         MoveWindow(GetDlgItem(hwnd, IDCANCEL), rc.right - m - DPIX(88),
@@ -488,7 +522,8 @@ static LRESULT CALLBACK parse_dlg_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
         if (LOWORD(wp) == IDOK) {
             wchar_t buf[QP_VALUE_MAX];
             const Segment *target = combo_selected_seg(c->hTarget);
-            int is_split = (int)SendMessageW(c->hType, CB_GETCURSEL, 0, 0) == 0;
+            int sel = (int)SendMessageW(c->hType, CB_GETCURSEL, 0, 0);
+            int is_split = (sel == 0), is_contains = (sel == 1), is_between = (sel == 2);
 
             if (!target) {
                 qp_msgbox(hwnd, MB_OK | MB_ICONWARNING, L"提示",
@@ -501,20 +536,28 @@ static LRESULT CALLBACK parse_dlg_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
                 SetFocus(c->hDelim);
                 return 0;
             }
-            c->rule->type = is_split ? PARSE_SPLIT : PARSE_CONTAINS;
+            c->rule->type = is_split ? PARSE_SPLIT :
+                            is_between ? PARSE_BETWEEN : PARSE_CONTAINS;
             qp_strlcpy(c->rule->delimiter, buf, QP_SEP_MAX);
             qp_get_text(c->hIndex, buf, QP_VALUE_MAX);
             c->rule->segment_index = _wtoi(buf);
             if (c->rule->segment_index <= 0) c->rule->segment_index = 1;
+            /* 关键词 = 命中词（分隔/包含）或前标记（取两标记之间） */
             qp_get_text(c->hKeyword, buf, QP_VALUE_MAX);
             qp_trim(buf);
             qp_strlcpy(c->rule->keyword, buf, QP_KEYWORD_MAX);
-            if (!is_split && !buf[0]) {
+            if (is_contains && !buf[0]) {
                 qp_msgbox(hwnd, MB_OK | MB_ICONWARNING, L"提示",
                           L"「包含关键词」规则必须填写关键词。");
                 SetFocus(c->hKeyword);
                 return 0;
             }
+            /* 后标记（仅取两标记之间用；其余类型留空不影响） */
+            qp_get_text(c->hMarkerAfter, buf, QP_VALUE_MAX);
+            qp_trim(buf);
+            qp_strlcpy(c->rule->marker_after, buf, QP_KEYWORD_MAX);
+            c->rule->per_paragraph =
+                (SendMessageW(c->hPara, BM_GETCHECK, 0, 0) == BST_CHECKED) ? 1 : 0;
             qp_strlcpy(c->rule->target_segment_id, target->id, QP_ID_MAX);
             qp_get_text(c->hFill, buf, QP_VALUE_MAX);
             qp_strlcpy(c->rule->fill_value, buf, QP_VALUE_MAX);
@@ -546,7 +589,7 @@ static int dlg_parse_rule(HWND owner, ParseRule *rule, const Template *t,
     c.tmpl = t;
     c.owner_seg = owner_seg;
     dlg = make_dlg(L"QuickPhraseParseRule", parse_dlg_proc, L"解析规则",
-                   440, 268, owner, &c);
+                   440, 330, owner, &c);
     return run_modal(owner, dlg, &c.result);
 }
 
@@ -925,7 +968,7 @@ static int dlg_cond_rule(HWND owner, ConditionRule *rule, const Template *t,
 /* 设计尺寸 = 能缩到的最小尺寸；窗口可以往大拉，多出来的空间给列表和预览。
    长模板（上百个片段）在这里编辑时，能拉大 + 预览能拖高才看得过来。 */
 #define ED_MIN_W       880
-#define ED_MIN_H       662
+#define ED_MIN_H       690         /* 头部多了「批量」一行（+28），随之抬高下限 */
 #define ED_PREVIEW_DEF 46          /* 默认值预览的设计高度 */
 #define ED_SPLIT_HIT   DPIX(8)     /* 预览分隔条的命中高度 */
 
@@ -938,6 +981,7 @@ typedef struct {
     int cur;                     /* 当前片段索引 */
 
     HWND hName, hGroup, hSegLbl, hSegList;
+    HWND hBatch, hBatchSrc, hBatchSrcLbl;     /* 批量：源变量按行重复整模板输出 */
     HWND hAddStatic, hAddText, hAddSelect, hAddMulti, hAddTime;
     HWND hSegDel, hSegUp, hSegDown;
 
@@ -951,6 +995,7 @@ typedef struct {
     HWND hSepLbl, hSep;
     HWND hFmtLbl, hFmt, hFmtSample;   /* 时间格式 + 实时效果 */
     HWND hHidden;
+    HWND hNoOutput;                   /* 参与匹配/引用/占位符，但不进入最终输出 */
     HWND hMultiline;
     HWND hRefLbl, hRef;                       /* 引用哪个变量 */
     HWND hRefModeLbl, hRefMode, hRefA, hRefB; /* 取整体 / 第 N 段 / 第 N 个字起 */
@@ -1047,8 +1092,9 @@ static void ed_seg_summary(const Segment *s, const Template *t, wchar_t *out, si
     if (s->type == SEG_STATIC) {
         qp_strlcpy(out, s->content, cap);
     } else {
-        _snwprintf(out, cap, L"【%ls】%ls%ls", seg_display_name(s),
+        _snwprintf(out, cap, L"【%ls】%ls%ls%ls", seg_display_name(s),
                    s->hidden ? L"（隐藏）" : L"",
+                   s->no_output ? L"（不计入）" : L"",
                    (s->type == SEG_TEXT && s->multiline) ? L"（多行）" : L"");
         out[cap - 1] = L'\0';
         n = wcslen(out);
@@ -1127,7 +1173,7 @@ static void ed_layout_props(EditorCtx *c)
     RECT rc;
     HDWP dwp;
     int m = DPIX(12), x, lw = DPIX(80), bodybot;
-    int cx, cw, y = DPIX(68);
+    int cx, cw, y = DPIX(96);      /* 头部多了「批量」一行，属性区顶随之下移 */
     int has = s != NULL;
     int t = has ? (int)s->type : -1;
     int show_label = has && t != SEG_STATIC;
@@ -1167,7 +1213,7 @@ static void ed_layout_props(EditorCtx *c)
     } while (0)
 
     ShowWindow(c->hPropTitle, has ? SW_SHOW : SW_HIDE);
-    dwp = qp_defer(dwp, c->hPropTitle, x, DPIX(44), cw + lw, DPIX(18));
+    dwp = qp_defer(dwp, c->hPropTitle, x, DPIX(72), cw + lw, DPIX(18));
 
     ED_ROW(c->hTypeLbl, c->hType, has, 24);
     ED_ROW(c->hLabelLbl, c->hLabel, show_label, 24);
@@ -1194,6 +1240,14 @@ static void ed_layout_props(EditorCtx *c)
     ShowWindow(c->hHidden, show_hidden ? SW_SHOW : SW_HIDE);
     if (show_hidden) {
         dwp = qp_defer(dwp, c->hHidden, cx, y, cw, DPIX(22));
+        y += DPIX(22) + DPIX(6);
+    }
+    /* 「不计入输出」与「隐藏」正交：隐藏只是填写界面不显示、照常拼进输出；
+       不计入输出则照常参与匹配 / 引用 / 占位符，但不出现在最终口径里。
+       对所有非固定变量都可用（拼表格行时源句子与列变量都用它） */
+    ShowWindow(c->hNoOutput, show_hidden ? SW_SHOW : SW_HIDE);
+    if (show_hidden) {
+        dwp = qp_defer(dwp, c->hNoOutput, cx, y, cw, DPIX(22));
         y += DPIX(22) + DPIX(6);
     }
     ShowWindow(c->hMultiline, show_multi ? SW_SHOW : SW_HIDE);
@@ -1371,6 +1425,30 @@ static void ed_load_ref_params(EditorCtx *c)
     c->loading = save;
 }
 
+/* 批量源变量下拉：第一项固定「（未选）」，其后列出本模板的「文本输入」变量
+   —— 多行粘贴只有文本变量装得下。选中当前源；源已删除 / 改成别的类型时回落到
+   「（未选）」（保存时再把悬空 id 一并清掉，与引用悬空同一口径）。 */
+static void ed_fill_batch_combo(EditorCtx *c)
+{
+    Segment *s;
+    int i = 1, sel = 0;
+    SendMessageW(c->hBatchSrc, CB_RESETCONTENT, 0, 0);
+    SendMessageW(c->hBatchSrc, CB_ADDSTRING, 0, (LPARAM)L"（未选）");
+    SendMessageW(c->hBatchSrc, CB_SETITEMDATA, 0, (LPARAM)NULL);
+    for (s = c->t->segments; s; s = s->next) {
+        wchar_t item[QP_LABEL_MAX + 32];
+        if (s->type != SEG_TEXT) continue;
+        _snwprintf(item, QP_LABEL_MAX + 32, L"%ls", seg_display_name(s));
+        item[QP_LABEL_MAX + 31] = L'\0';
+        SendMessageW(c->hBatchSrc, CB_ADDSTRING, 0, (LPARAM)item);
+        SendMessageW(c->hBatchSrc, CB_SETITEMDATA, (WPARAM)i, (LPARAM)s);
+        if (c->t->batch_source_id[0] && wcscmp(s->id, c->t->batch_source_id) == 0)
+            sel = i;
+        ++i;
+    }
+    SendMessageW(c->hBatchSrc, CB_SETCURSEL, (WPARAM)sel, 0);
+}
+
 static void ed_load_props(EditorCtx *c)
 {
     Segment *s = ed_cur_seg(c);
@@ -1384,6 +1462,8 @@ static void ed_load_props(EditorCtx *c)
         SetWindowTextW(c->hSep, s->separator);
         SendMessageW(c->hHidden, BM_SETCHECK,
                      s->hidden ? BST_CHECKED : BST_UNCHECKED, 0);
+        SendMessageW(c->hNoOutput, BM_SETCHECK,
+                     s->no_output ? BST_CHECKED : BST_UNCHECKED, 0);
         SendMessageW(c->hMultiline, BM_SETCHECK,
                      s->multiline ? BST_CHECKED : BST_UNCHECKED, 0);
         SetWindowTextW(c->hFmt, s->time_format);
@@ -1395,11 +1475,13 @@ static void ed_load_props(EditorCtx *c)
         SetWindowTextW(c->hDef, L"");
         SetWindowTextW(c->hSep, L"");
         SendMessageW(c->hHidden, BM_SETCHECK, BST_UNCHECKED, 0);
+        SendMessageW(c->hNoOutput, BM_SETCHECK, BST_UNCHECKED, 0);
         SendMessageW(c->hMultiline, BM_SETCHECK, BST_UNCHECKED, 0);
         SetWindowTextW(c->hFmt, L"");
     }
     ed_update_fmt_sample(c);
     ed_fill_ref_combo(c);
+    ed_fill_batch_combo(c);          /* 变量增删 / 改类型后，源下拉随之刷新 */
     ed_load_ref_params(c);
     ed_fill_optlist(c);
     ed_fill_rulelists(c);
@@ -1429,6 +1511,8 @@ static void ed_commit_props(EditorCtx *c)
     }
     s->hidden = (s->type != SEG_STATIC &&
                  SendMessageW(c->hHidden, BM_GETCHECK, 0, 0) == BST_CHECKED) ? 1 : 0;
+    s->no_output = (s->type != SEG_STATIC &&
+                    SendMessageW(c->hNoOutput, BM_GETCHECK, 0, 0) == BST_CHECKED) ? 1 : 0;
     s->multiline = (s->type == SEG_TEXT &&
                     SendMessageW(c->hMultiline, BM_GETCHECK, 0, 0) == BST_CHECKED) ? 1 : 0;
     ed_update_preview(c);
@@ -1669,6 +1753,7 @@ static void ed_parse_add(EditorCtx *c)
         parse_rule_append(&s->parse_rules, r);
         ed_fill_rulelists(c);
         lv_select(c->hParseList, parse_rule_count(s->parse_rules) - 1);
+        ed_update_preview(c);
     } else {
         parse_rule_free(r);
     }
@@ -1694,6 +1779,7 @@ static void ed_parse_edit(EditorCtx *c)
         free(copy);
         ed_fill_rulelists(c);
         lv_select(c->hParseList, i);
+        ed_update_preview(c);
     } else {
         parse_rule_free(copy);
     }
@@ -1707,6 +1793,7 @@ static void ed_parse_del(EditorCtx *c)
     parse_rule_remove_at(&s->parse_rules, i);
     ed_fill_rulelists(c);
     lv_select(c->hParseList, i);
+    ed_update_preview(c);
 }
 
 static void ed_parse_move(EditorCtx *c, int delta)
@@ -1717,6 +1804,7 @@ static void ed_parse_move(EditorCtx *c, int delta)
     if (!parse_rule_move(&s->parse_rules, i, i + delta)) return;
     ed_fill_rulelists(c);
     lv_select(c->hParseList, i + delta);
+    ed_update_preview(c);
 }
 
 /* --------------------------- 条件规则 ----------------------------- */
@@ -1804,7 +1892,7 @@ static void ed_layout(EditorCtx *c)
     prevH = ed_preview_height_for(H);
     prevY = btnY - DPIX(8) - prevH;
 
-    dwp = BeginDeferWindowPos(16);
+    dwp = BeginDeferWindowPos(20);
 
     /* 第一行：名称 + 分组 */
     y = m;
@@ -1814,10 +1902,16 @@ static void ed_layout(EditorCtx *c)
                    m + lw + DPIX(244), y + DPIX(4), DPIX(44), DPIX(18));
     dwp = qp_defer(dwp, c->hGroup, m + lw + DPIX(292), y, DPIX(180), DPIX(24));
 
+    /* 第二行：批量开关 + 源变量下拉（模板级，横贯头部，两列都在它下方） */
+    y = DPIX(42);
+    dwp = qp_defer(dwp, c->hBatch, m, y, DPIX(230), DPIX(22));
+    dwp = qp_defer(dwp, c->hBatchSrcLbl, m + DPIX(236), y + DPIX(3), DPIX(52), DPIX(18));
+    dwp = qp_defer(dwp, c->hBatchSrc, m + DPIX(292), y, DPIX(200), DPIX(24));
+
     /* 左侧：片段列表 */
-    y = DPIX(44);
+    y = DPIX(72);
     dwp = qp_defer(dwp, c->hSegLbl, listx, y, listw, DPIX(18));
-    y = DPIX(68);
+    y = DPIX(96);
     bw = (listw - DPIX(12)) / 5;
     dwp = qp_defer(dwp, c->hAddStatic, listx, y, bw, bh);
     dwp = qp_defer(dwp, c->hAddText, listx + bw + DPIX(3), y, bw, bh);
@@ -1866,6 +1960,23 @@ static void ed_fill_groups(EditorCtx *c)
     }
     SendMessageW(c->hGroup, CB_SETCURSEL, (WPARAM)sel, 0);
 }
+
+/* 批量开关 + 源下拉：勾选才启用源下拉；把当前选择写回模板。
+   loading 时只摆状态、不回写（与其它属性同一纪律）。 */
+static void ed_sync_batch(EditorCtx *c)
+{
+    int on = SendMessageW(c->hBatch, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    EnableWindow(c->hBatchSrc, on);
+    EnableWindow(c->hBatchSrcLbl, on);
+    if (c->loading) return;
+    c->t->batch_mode = on ? 1 : 0;
+    if (on) {
+        const Segment *src = combo_selected_seg(c->hBatchSrc);
+        qp_strlcpy(c->t->batch_source_id, src ? src->id : L"", QP_ID_MAX);
+    }
+    ed_update_preview(c);
+}
+
 
 /*
  * 保存前的体检：把「配好了但永远不会生效」的规则摆出来。
@@ -1943,6 +2054,11 @@ static LRESULT CALLBACK editor_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         qp_create(L"Static", L"分组：", SS_RIGHT, 0, 0, 0, 10, 10, hwnd,
                   IDC_ED_GROUP + 1000);
         c->hGroup = mk_combo(hwnd, IDC_ED_GROUP);
+        /* 批量：一句话→表格一行时，把源变量的多行粘贴逐行重复整模板输出 */
+        c->hBatch = mk_check(hwnd, L"批量：源变量按行重复输出（一行一份）",
+                             IDC_ED_BATCH);
+        c->hBatchSrcLbl = mk_label_r(hwnd, L"源变量：", 0);
+        c->hBatchSrc = mk_combo(hwnd, IDC_ED_BATCH_SRC);
 
         /* 左侧 */
         c->hSegLbl = mk_label(hwnd, L"片段（自上而下拼接，可拖动排序）", 0);
@@ -1991,6 +2107,8 @@ static LRESULT CALLBACK editor_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         c->hFmtSample = mk_label(hwnd, L"", IDC_ED_SEG_FMT_SAMPLE);
         c->hHidden = mk_check(hwnd, L"在填写界面隐藏（只由变量匹配 / 默认值填充）",
                               IDC_ED_SEG_HIDDEN);
+        c->hNoOutput = mk_check(hwnd, L"不计入输出（照常参与匹配 / 引用 / 占位符，但不拼进口径）",
+                                IDC_ED_SEG_NOOUTPUT);
         c->hMultiline = mk_check(hwnd, L"多行文本框（大段文字，可换行）",
                                  IDC_ED_SEG_MULTILINE);
         c->hRefLbl = mk_label_r(hwnd, L"引用：", 0);
@@ -2042,10 +2160,13 @@ static LRESULT CALLBACK editor_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
         SetWindowTextW(c->hName, c->t->name);
         ed_fill_groups(c);
+        SendMessageW(c->hBatch, BM_SETCHECK,
+                     c->t->batch_mode ? BST_CHECKED : BST_UNCHECKED, 0);
         c->cur = seg_list_count(c->t->segments) > 0 ? 0 : -1;
         ed_layout(c);
         ed_fill_seglist(c, c->cur < 0 ? 0 : c->cur);
-        ed_load_props(c);
+        ed_load_props(c);            /* 内部 ed_fill_batch_combo 选中当前源 */
+        ed_sync_batch(c);            /* 按开关状态启用 / 禁用源下拉（loading 中不回写） */
         ed_update_preview(c);
         qp_theme_children(hwnd);
         c->loading = 0;
@@ -2234,10 +2355,17 @@ static LRESULT CALLBACK editor_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             return 0;
         case IDC_ED_SEG_HIDDEN:
         case IDC_ED_SEG_MULTILINE:
+        case IDC_ED_SEG_NOOUTPUT:
             if (code == BN_CLICKED && !c->loading) {
                 ed_commit_props(c);
                 ed_refresh_cur_row(c);
             }
+            return 0;
+        case IDC_ED_BATCH:
+            if (code == BN_CLICKED) ed_sync_batch(c);
+            return 0;
+        case IDC_ED_BATCH_SRC:
+            if (code == CBN_SELCHANGE) ed_sync_batch(c);
             return 0;
         case IDC_ED_SEG_FORMAT:
             /* 下拉里选一个（SELCHANGE）或自己敲（EDITCHANGE），两条路都算改格式 */
@@ -2318,6 +2446,13 @@ static LRESULT CALLBACK editor_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             }
             /* 体检：能证明不会生效的规则，保存前提一句（不拦人） */
             if (!ed_check_lint(hwnd, c)) return 0;
+            /* 批量源变量指向已删除 / 非文本变量时，按引用悬空同一口径把 id 清掉
+               （开关留着：运行时无有效源会自动退化为单行，不会出错；体检已在上面
+               提醒过了，用户执意保存就不再留个悬空指针在存档里） */
+            if (c->t->batch_source_id[0]) {
+                const Segment *bs = tmpl_find_segment(c->t, c->t->batch_source_id);
+                if (!bs || bs->type != SEG_TEXT) c->t->batch_source_id[0] = L'\0';
+            }
             qp_strlcpy(c->t->name, name, QP_NAME_MAX);
             gi = (int)SendMessageW(c->hGroup, CB_GETCURSEL, 0, 0);
             g = (gi > 0) ? (Group *)SendMessageW(c->hGroup, CB_GETITEMDATA, (WPARAM)gi, 0)

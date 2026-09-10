@@ -119,6 +119,9 @@
 #define IDC_ED_SEG_REF_A        3047   /* 取法参数一：分隔符 / 起始 */
 #define IDC_ED_SEG_REF_B        3048   /* 取法参数二：第N段 / 取几个 */
 #define IDC_ED_SEG_HINT         3049   /* 固定内容的占位符提示行    */
+#define IDC_ED_SEG_NOOUTPUT     3050   /* 变量：参与匹配但不进入最终输出 */
+#define IDC_ED_BATCH            3051   /* 模板：批量按行重复输出（复选） */
+#define IDC_ED_BATCH_SRC        3052   /* 批量的源变量（下拉）      */
 
 /* 规则编辑子对话框 */
 #define IDC_RL_TYPE             3101
@@ -139,6 +142,8 @@
 #define IDC_RL_TERM_ADD         3116
 #define IDC_RL_TERM_DEL         3117
 #define IDC_RL_NEGATE           3118   /* 「不满足」取反勾选  */
+#define IDC_RL_MARKER_AFTER     3119   /* 取两标记之间：后标记 */
+#define IDC_RL_PARA             3120   /* 逐段处理（源含多段时每段各出一次）*/
 
 /* 设置对话框 */
 #define IDC_SET_HOTKEY          3201
