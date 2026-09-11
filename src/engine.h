@@ -24,6 +24,7 @@
 #define QP_PLACEHOLD_MAX 128
 #define QP_SEP_MAX       16
 #define QP_KEYWORD_MAX   128
+#define QP_PATTERN_MAX   512          /* 正则表达式模式串              */
 #define QP_MATCH_MAX     256
 #define QP_VALUE_MAX     2048         /* 变量取值：要装得下多行大段文字 */
 #define QP_RESULT_MAX    2048
@@ -36,6 +37,8 @@
 #define QP_EVAL_MAX_PASS 8
 /* 引用链的最大深度：A 引用 B、B 引用 C…… 同时也是成环检测的上限 */
 #define QP_REF_MAX_DEPTH 16
+/* 单个片段的内容里最多记几处「占位符展开成空」（预览标红用） */
+#define QP_EMPTY_MARK_MAX 8
 
 /* ------------------------------------------------------------------ */
 /* 枚举                                                                */
@@ -58,7 +61,8 @@ typedef enum {
 typedef enum {
     PARSE_SPLIT = 0,      /* 按分隔符切割取第 N 段 */
     PARSE_CONTAINS = 1,   /* 包含关键词            */
-    PARSE_BETWEEN = 2     /* 取「前标记」与「后标记」之间的内容 */
+    PARSE_BETWEEN = 2,    /* 取「前标记」与「后标记」之间的内容 */
+    PARSE_REGEX = 3       /* 正则表达式匹配（取整体或第 N 个捕获组） */
 } ParseRuleType;
 
 typedef enum {
@@ -92,6 +96,8 @@ typedef struct ParseRule {
     wchar_t keyword[QP_KEYWORD_MAX];      /* split/contains: 命中关键词（空=任意命中）；
                                              between: 前标记（空=从头）           */
     wchar_t marker_after[QP_KEYWORD_MAX]; /* between: 后标记（空=到末尾）         */
+    wchar_t pattern[QP_PATTERN_MAX];      /* regex: 正则表达式（大小写不敏感搜索）*/
+    int     capture_group;                /* regex: 取第几个捕获组；0 = 整体匹配  */
     int     per_paragraph;                /* 1 = 源按换行拆成多段，逐段抽取、结果按行合并 */
     wchar_t target_segment_id[QP_ID_MAX]; /* 目标变量片段 id          */
     wchar_t fill_value[QP_VALUE_MAX];     /* 填充值（空=用提取到的值） */
@@ -213,6 +219,8 @@ typedef struct EvalField {
     int     user_touched;               /* 用户是否手动输入过          */
     int     rule_driven;                /* 本次求值是否由规则推导得到
                                            （规则值优先，手动输入让位）*/
+    int     empty_count;                /* value 里有几处「占位符展开成空」*/
+    int     empty_marks[QP_EMPTY_MARK_MAX]; /* 这些位置在 value 中的下标 */
 } EvalField;
 
 typedef struct EvalContext {
@@ -370,6 +378,16 @@ void         eval_run(EvalContext *ctx);
 /* 指定输出格式渲染；表格格式未启用或为空时返回空。 */
 size_t       eval_render_mode(EvalContext *ctx, OutputMode mode,
                               wchar_t *out, size_t cap);
+/* 预览专用：普通文本渲染，并把「本该有值却空着」的位置记进 marks
+   （相对 out 的字符下标，最多 mark_cap 条，*mark_count 写回实际条数）。
+   两类算是失败：①固定内容里的 {变量} 展开成空串；②某个变量的值是空的，
+   而它正是某条解析规则的目标（= 解析规则没命中）。取值总则不受影响，
+   这里只是把「哪儿缺了」指给界面看。 */
+size_t       eval_render_text_marked(EvalContext *ctx, wchar_t *out, size_t cap,
+                                     int *marks, int mark_cap, int *mark_count);
+/* 批量版的文本渲染 + 失败位置（逐行求值，标记位置已折算成整段输出里的下标） */
+size_t       eval_render_batch_text_marked(EvalContext *ctx, wchar_t *out, size_t cap,
+                                           int *marks, int mark_cap, int *mark_count);
 /* 拼接输出 */
 size_t       eval_render(const EvalContext *ctx, wchar_t *out, size_t cap);
 /* 指定输出格式的批量渲染；结束后恢复 ctx 的完整源输入。 */
@@ -407,6 +425,7 @@ typedef enum {
     LINT_COND_DANGLING,       /* 条件指向的变量没选/已删除 */
     LINT_COND_EMPTY,          /* 命中后把这一段变成空      */
     LINT_PARSE_DANGLING,      /* 解析规则的目标已删除      */
+    LINT_PARSE_REGEX,         /* 正则规则没填模式 / 模式语法有误 */
     LINT_PLACEHOLDER,         /* 占位符名字认不出来        */
     LINT_BATCH_SOURCE         /* 批量模式的源变量没选/已删除/不是文本变量 */
 } LintKind;

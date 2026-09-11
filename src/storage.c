@@ -266,6 +266,7 @@ static const char *parse_type_key(ParseRuleType t)
     switch (t) {
     case PARSE_CONTAINS: return "contains";
     case PARSE_BETWEEN:  return "between";
+    case PARSE_REGEX:    return "regex";
     default:             return "split";
     }
 }
@@ -274,6 +275,7 @@ static ParseRuleType parse_type_from_key(const char *k)
 {
     if (k && strcmp(k, "contains") == 0) return PARSE_CONTAINS;
     if (k && strcmp(k, "between") == 0)  return PARSE_BETWEEN;
+    if (k && strcmp(k, "regex") == 0)    return PARSE_REGEX;
     return PARSE_SPLIT;
 }
 
@@ -333,6 +335,9 @@ static cJSON *parse_rule_to_json(const ParseRule *r)
     cJSON_AddNumberToObject(o, "segmentIndex", r->segment_index);
     json_add_w(o, "keyword", r->keyword);
     json_add_w(o, "markerAfter", r->marker_after);
+    /* 正则模式按需写出：旧版本读到未知 type 会退回 split，不会报错 */
+    if (r->pattern[0]) json_add_w(o, "pattern", r->pattern);
+    if (r->capture_group > 0) cJSON_AddNumberToObject(o, "captureGroup", r->capture_group);
     if (r->per_paragraph) cJSON_AddBoolToObject(o, "perParagraph", 1);
     json_add_w(o, "targetSegmentId", r->target_segment_id);
     json_add_w(o, "fillValue", r->fill_value);
@@ -513,6 +518,9 @@ static ParseRule *parse_rule_from_json(const cJSON *o)
     if (r->segment_index < 1) r->segment_index = 1;
     json_get_w(o, "keyword", r->keyword, QP_KEYWORD_MAX);
     json_get_w(o, "markerAfter", r->marker_after, QP_KEYWORD_MAX);
+    json_get_w(o, "pattern", r->pattern, QP_PATTERN_MAX);
+    r->capture_group = json_get_int(o, "captureGroup", 0);
+    if (r->capture_group < 0) r->capture_group = 0;
     r->per_paragraph = json_get_int(o, "perParagraph", 0) ? 1 : 0;
     json_get_w(o, "targetSegmentId", r->target_segment_id, QP_ID_MAX);
     json_get_w(o, "fillValue", r->fill_value, QP_VALUE_MAX);

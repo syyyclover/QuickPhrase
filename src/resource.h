@@ -23,6 +23,7 @@
 #define IDC_TABS                1012   /* 并行填写的标签条（自绘） */
 #define IDC_PREVIEW_MODE_TEXT   1013   /* 主窗口：普通文本预览 */
 #define IDC_PREVIEW_MODE_TABLE  1014   /* 主窗口：表格预览 */
+#define IDC_PREVIEW_TABLE       1015   /* 主窗口：表格预览（自绘控件） */
 
 /* 动态字段控件 ID 基址（每个字段占 3 个 ID） */
 #define IDC_FIELD_BASE          2000

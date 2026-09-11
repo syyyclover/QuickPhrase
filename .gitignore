@@ -2,6 +2,9 @@
 /build/
 /dist/
 
+# 版本快照（tools/snapshot.sh 生成；故意放在 build/ 之外，免得 make clean 连它一起删）
+/snapshots/
+
 # mkicon.py 顺带生成的预览图，构建不依赖它
 /res/app.png
 
@@ -34,6 +37,8 @@ desktop.ini
 
 # 临时文件
 _review_diff.txt
+
+# 验收样例（tools/snapshot.sh 之外的用户自备输入；放 examples/ 下仍按名字忽略）
 示例.png
 示例.txt
 示例完整.txt

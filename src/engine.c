@@ -3,6 +3,7 @@
  * 纯 C 实现，不含任何窗口 API，便于独立单元测试。
  */
 #include "engine.h"
+#include "regex.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -264,23 +265,43 @@ static size_t append_unescaped(wchar_t *out, size_t cap, size_t used,
     return used;
 }
 
-size_t qp_expand_placeholders(const wchar_t *src, QpPlaceholderLookup lookup,
-                              void *user, wchar_t *out, size_t cap)
+/* 带标记的占位符展开（内部用）：值取到空串时把位置记进 marks。
+   out_base 会加在每个记录上，便于拼进更大的缓冲后仍能定位。 */
+static size_t qp_expand_placeholders_marked(const wchar_t *src, QpPlaceholderLookup lookup,
+                                            void *user, wchar_t *out, size_t cap,
+                                            int out_base, int *marks, int mark_cap,
+                                            int *mark_count)
 {
     size_t used = 0, pos = 0, s = 0, e = 0;
     wchar_t name[QP_LABEL_MAX];
+    int n = 0;
+    if (mark_count) *mark_count = 0;
     if (!out || cap == 0) return 0;
     out[0] = L'\0';
     if (!src) return 0;
     while (placeholder_next(src, pos, &s, &e, name, QP_LABEL_MAX)) {
         const wchar_t *v = lookup ? lookup(user, name) : NULL;
         used = append_unescaped(out, cap, used, src + pos, s - pos);
-        if (v) used = append_n(out, cap, used, v, wcslen(v));
-        else   used = append_n(out, cap, used, src + s, e - s + 1);
+        if (v) {
+            /* 认得出、但此刻是空 —— 这里本该出现一段内容却没出现 */
+            if (!v[0] && marks && n < mark_cap) marks[n++] = out_base + (int)used;
+            used = append_n(out, cap, used, v, wcslen(v));
+        } else {
+            /* 认不出的名字原样保留（写错了要看得见），不算「缺内容」 */
+            used = append_n(out, cap, used, src + s, e - s + 1);
+        }
         pos = e + 1;
     }
     used = append_unescaped(out, cap, used, src + pos, wcslen(src + pos));
+    if (mark_count) *mark_count = n;
     return used;
+}
+
+size_t qp_expand_placeholders(const wchar_t *src, QpPlaceholderLookup lookup,
+                              void *user, wchar_t *out, size_t cap)
+{
+    return qp_expand_placeholders_marked(src, lookup, user, out, cap, 0,
+                                         NULL, 0, NULL);
 }
 
 int qp_placeholder_at(const wchar_t *src, int index, wchar_t *name, size_t cap)
@@ -1427,6 +1448,23 @@ static int parse_rule_hit(const ParseRule *r, const wchar_t *input,
         if (extracted) qp_strlcpy(extracted, part, cap);
         return 1;
     }
+    if (r->type == PARSE_REGEX) {
+        /* 正则：在源里搜索第一次匹配，取整体（capture_group = 0）或第 N 个
+           捕获组。取到空串视为未命中，与 split / between 同一口径。 */
+        QpRegexSpan sp[QP_REGEX_MAX_GROUPS];
+        int g = r->capture_group;
+        if (!r->pattern[0]) return 0;
+        if (g < 0 || g >= QP_REGEX_MAX_GROUPS) return 0;
+        if (!qp_regex_search(r->pattern, input, sp, QP_REGEX_MAX_GROUPS)) return 0;
+        if (!sp[g].begin || sp[g].len == 0) return 0;
+        if (extracted && cap) {
+            size_t n = sp[g].len;
+            if (n >= cap) n = cap - 1;
+            wmemcpy(extracted, sp[g].begin, n);
+            extracted[n] = L'\0';
+        }
+        return 1;
+    }
     /* PARSE_CONTAINS */
     if (!r->keyword[0]) return 0;
     if (!qp_istr(input, r->keyword)) return 0;
@@ -1563,6 +1601,8 @@ void eval_run(EvalContext *ctx)
     int *parse_set;      /* 本轮该目标已被解析规则占下 */
     int *condition_set;  /* 本轮该字段由条件规则给值 */
     int *ref_cycle;      /* 该字段的引用链上有环 → 整条不生效 */
+    int *empty_slots;    /* 本轮各字段「占位符展开成空」的位置（count × 上限） */
+    int *empty_n;        /* 本轮各字段记了几处 */
     int i, pass, rp;
 
     if (!ctx || ctx->count <= 0) return;
@@ -1573,9 +1613,11 @@ void eval_run(EvalContext *ctx)
     parse_set = (int *)calloc((size_t)ctx->count, sizeof(int));
     condition_set = (int *)calloc((size_t)ctx->count, sizeof(int));
     ref_cycle = (int *)calloc((size_t)ctx->count, sizeof(int));
+    empty_slots = (int *)calloc((size_t)ctx->count * QP_EMPTY_MARK_MAX, sizeof(int));
+    empty_n = (int *)calloc((size_t)ctx->count, sizeof(int));
     if (!work || !derived || !derived_set || !parse_set || !condition_set || !ref_cycle) {
         free(work); free(derived); free(derived_set); free(parse_set);
-        free(condition_set); free(ref_cycle);
+        free(condition_set); free(ref_cycle); free(empty_slots); free(empty_n);
         return;
     }
     ctx->unstable = 0;
@@ -1682,6 +1724,7 @@ void eval_run(EvalContext *ctx)
         for (i = 0; i < ctx->count; ++i) {
             EvalField *f = &ctx->fields[i];
             wchar_t next[QP_VALUE_MAX];
+            if (empty_n) empty_n[i] = 0;
             if (derived_set[i]) {
                 qp_strlcpy(next, derived[i], QP_VALUE_MAX);
             } else if (f->user_touched) {
@@ -1692,7 +1735,9 @@ void eval_run(EvalContext *ctx)
             /* 固定片段或本轮命中的条件结果里的 {变量名} 换成那个变量此刻的值，
                同时把 \t \n \\ 这些转义折出来。放在这里是为了让它跟着不动点一起
                收敛；每轮都从模板原文 / 规则结果重新展开，所以只替换一层，不会
-               越展开越长。手填、默认、解析与引用拿到的文本仍保持字面量。 */
+               越展开越长。手填、默认、解析与引用拿到的文本仍保持字面量。
+               顺手把「展开成空串」的位置记下来（预览要据此标红），记的正是产出
+               这一版值的那一次展开，所以位置与值永远对得上。 */
             if (f->seg &&
                 ((f->seg->type == SEG_STATIC &&
                   (wcschr(next, L'{') || wcschr(next, L'\\'))) ||
@@ -1702,8 +1747,11 @@ void eval_run(EvalContext *ctx)
                 pc.ctx = ctx;
                 pc.work = work;
                 pc.self = i;
-                qp_expand_placeholders(next, eval_placeholder_lookup, &pc,
-                                       expanded, QP_VALUE_MAX);
+                qp_expand_placeholders_marked(
+                    next, eval_placeholder_lookup, &pc, expanded, QP_VALUE_MAX, 0,
+                    empty_slots ? empty_slots + (size_t)i * QP_EMPTY_MARK_MAX : NULL,
+                    QP_EMPTY_MARK_MAX,
+                    empty_n ? &empty_n[i] : NULL);
                 qp_strlcpy(next, expanded, QP_VALUE_MAX);
             }
             if (wcscmp(next, work[i]) != 0) {
@@ -1721,8 +1769,13 @@ void eval_run(EvalContext *ctx)
     /* 提交 */
     for (i = 0; i < ctx->count; ++i) {
         EvalField *f = &ctx->fields[i];
+        int k, n = empty_n ? empty_n[i] : 0;
+        if (n > QP_EMPTY_MARK_MAX) n = QP_EMPTY_MARK_MAX;
         f->rule_driven = derived_set[i];
         qp_strlcpy(f->value, work[i], QP_VALUE_MAX);
+        f->empty_count = n;
+        for (k = 0; k < n; ++k)
+            f->empty_marks[k] = empty_slots[(size_t)i * QP_EMPTY_MARK_MAX + k];
     }
 
     free(work);
@@ -1731,6 +1784,8 @@ void eval_run(EvalContext *ctx)
     free(parse_set);
     free(condition_set);
     free(ref_cycle);
+    free(empty_slots);
+    free(empty_n);
 }
 
 size_t eval_render_mode(EvalContext *ctx, OutputMode mode, wchar_t *out, size_t cap)
@@ -1773,8 +1828,70 @@ size_t eval_render(const EvalContext *ctx, wchar_t *out, size_t cap)
     return eval_render_mode((EvalContext *)ctx, OUTPUT_TEXT, out, cap);
 }
 
-size_t eval_render_batch_mode(EvalContext *ctx, OutputMode mode,
-                              wchar_t *out, size_t cap)
+/* 该字段是不是某条解析规则的目标 —— 是的话，取值为空就说明规则没命中 */
+static int field_is_parse_target(const EvalContext *ctx, int idx)
+{
+    const wchar_t *want;
+    int i;
+    if (!ctx || idx < 0 || idx >= ctx->count) return 0;
+    want = ctx->fields[idx].seg ? ctx->fields[idx].seg->id : NULL;
+    if (!want || !want[0]) return 0;
+    for (i = 0; i < ctx->count; ++i) {
+        const Segment *s = ctx->fields[i].seg;
+        const ParseRule *r;
+        if (!s || s->type != SEG_TEXT) continue;
+        for (r = s->parse_rules; r; r = r->next)
+            if (wcscmp(r->target_segment_id, want) == 0) return 1;
+    }
+    return 0;
+}
+
+size_t eval_render_text_marked(EvalContext *ctx, wchar_t *out, size_t cap,
+                               int *marks, int mark_cap, int *mark_count)
+{
+    size_t used = 0;
+    int i, nm = 0;
+
+    if (mark_count) *mark_count = 0;
+    if (!out || cap == 0) return 0;
+    out[0] = L'\0';
+    if (!ctx) return 0;
+
+    for (i = 0; i < ctx->count; ++i) {
+        const EvalField *f = &ctx->fields[i];
+        const Segment *s = f->seg;
+        const wchar_t *v = f->value;
+        int k;
+
+        /* 「不计入输出」的变量不拼进普通文本，与 eval_render_mode 同一口径 */
+        if (s && s->no_output) continue;
+
+        /* ① 固定内容里「{变量} 展开成空」的位置。eval_run 记下的正是产出这一版
+              value 的那一次展开，所以下标与 v 严格对得上，不需要再展开一遍。 */
+        for (k = 0; k < f->empty_count && k < QP_EMPTY_MARK_MAX; ++k) {
+            if (!marks || nm >= mark_cap) break;
+            marks[nm++] = (int)used + f->empty_marks[k];
+        }
+        /* ② 值是空的、而它正是某条解析规则的目标 → 解析规则没命中 */
+        if (s && s->type != SEG_STATIC && (!v || !*v) &&
+            field_is_parse_target(ctx, i)) {
+            if (marks && nm < mark_cap) marks[nm++] = (int)used;
+        }
+        if (v && *v) used = append_n(out, cap, used, v, wcslen(v));
+    }
+    if (mark_count) *mark_count = nm;
+    return used;
+}
+
+/* 一行批量渲染最多记这么多处失败；够用且不必按行长分配 */
+#define QP_ROW_MARK_MAX 64
+
+/* 批量渲染的统一实现：mode 决定普通文本还是表格；marks 只在普通文本下有意义。
+   eval_render_batch_mode / eval_render_batch_text_marked 都走这里，保证两条
+   调用路径的逐行语义不会各自演化。 */
+static size_t render_batch_core(EvalContext *ctx, OutputMode mode,
+                                wchar_t *out, size_t cap,
+                                int *marks, int mark_cap, int *mark_count)
 {
     int src, saved_touched, first = 1;
     const wchar_t *srcval, *p, *nl;
@@ -1782,26 +1899,35 @@ size_t eval_render_batch_mode(EvalContext *ctx, OutputMode mode,
     wchar_t *row;
     size_t used = 0;
 
+    if (mark_count) *mark_count = 0;
     if (!out || cap == 0) return 0;
     out[0] = L'\0';
     if (!ctx) return 0;
 
-    /* 没开批量 / 没模板 / 没选源变量 / 源已删除 → 就按普通单次渲染 */
+    /* 没开批量 / 没模板 / 没选源变量 / 源已删除 / 源为空或只有一行
+       → 就按普通单次渲染 */
+#define QP_BATCH_FALLBACK()                                                   \
+    do {                                                                      \
+        if (mode == OUTPUT_TEXT)                                              \
+            return eval_render_text_marked(ctx, out, cap, marks, mark_cap,    \
+                                           mark_count);                       \
+        return eval_render_mode(ctx, mode, out, cap);                         \
+    } while (0)
+
     if (!ctx->tmpl || !ctx->tmpl->batch_mode || !ctx->tmpl->batch_source_id[0])
-        return eval_render_mode(ctx, mode, out, cap);
+        QP_BATCH_FALLBACK();
     src = eval_index_of_id(ctx, ctx->tmpl->batch_source_id);
-    if (src < 0) return eval_render_mode(ctx, mode, out, cap);
+    if (src < 0) QP_BATCH_FALLBACK();
 
     /* 源变量此刻的值：优先取用户手填的整段，否则取生效值 */
     srcval = ctx->fields[src].user_touched ? ctx->fields[src].user_value
                                            : ctx->fields[src].value;
     /* 源为空或只有一行 → 退化为单次渲染，免得边打字边预览时闪空 */
-    if (qp_is_blank(srcval) || !wcschr(srcval, L'\n'))
-        return eval_render_mode(ctx, mode, out, cap);
+    if (qp_is_blank(srcval) || !wcschr(srcval, L'\n')) QP_BATCH_FALLBACK();
 
     /* row 有 QP_OUTPUT_MAX 那么大，放堆上，别撑爆栈 */
     row = (wchar_t *)malloc(QP_OUTPUT_MAX * sizeof(wchar_t));
-    if (!row) return eval_render_mode(ctx, mode, out, cap);
+    if (!row) QP_BATCH_FALLBACK();
 
     /* 快照源字段，逐行注入后各渲染一遍，最后还原 */
     qp_strlcpy(saved, ctx->fields[src].user_value, QP_VALUE_MAX);
@@ -1819,10 +1945,29 @@ size_t eval_render_batch_mode(EvalContext *ctx, OutputMode mode,
         if (!qp_is_blank(line)) {
             eval_set_user_value(ctx, src, line);
             eval_run(ctx);
+            if (mode == OUTPUT_TEXT) {
+                int row_marks[QP_ROW_MARK_MAX];
+                size_t base;
+                int rn = 0, k;
+                eval_render_text_marked(ctx, row, QP_OUTPUT_MAX,
+                                        row_marks, QP_ROW_MARK_MAX, &rn);
+                /* 普通文本沿原行为：本行即使是空的也照样占一行 */
+                if (!first) used = append_n(out, cap, used, L"\n", 1);
+                base = used;
+                used = append_n(out, cap, used, row, wcslen(row));
+                /* 行内位置折算成整段输出里的位置 */
+                for (k = 0; k < rn && marks && mark_count &&
+                            *mark_count < mark_cap; ++k)
+                    marks[(*mark_count)++] = (int)base + row_marks[k];
+                first = 0;
+                if (!nl) break;
+                p = nl + 1;
+                continue;
+            }
             eval_render_mode(ctx, mode, row, QP_OUTPUT_MAX);
             /* 表格格式未启用、格式为空或本行展开为空时，不把它算成一行，
                否则第二个空行会凭空留下一个换行符。普通文本保持原有行为。 */
-            if (mode != OUTPUT_TABLE || row[0]) {
+            if (row[0]) {
                 if (!first) used = append_n(out, cap, used, L"\n", 1);
                 used = append_n(out, cap, used, row, wcslen(row));
                 first = 0;
@@ -1831,6 +1976,7 @@ size_t eval_render_batch_mode(EvalContext *ctx, OutputMode mode,
         if (!nl) break;
         p = nl + 1;
     }
+#undef QP_BATCH_FALLBACK
 
     /* 还原源字段并再跑一次，让 ctx 回到「整段已粘贴」的状态：填写界面照常显示
        全文，切走存快照也存整段，与没开批量时一致。 */
@@ -1844,6 +1990,18 @@ size_t eval_render_batch_mode(EvalContext *ctx, OutputMode mode,
 
     free(row);
     return used;
+}
+
+size_t eval_render_batch_mode(EvalContext *ctx, OutputMode mode,
+                              wchar_t *out, size_t cap)
+{
+    return render_batch_core(ctx, mode, out, cap, NULL, 0, NULL);
+}
+
+size_t eval_render_batch_text_marked(EvalContext *ctx, wchar_t *out, size_t cap,
+                                     int *marks, int mark_cap, int *mark_count)
+{
+    return render_batch_core(ctx, OUTPUT_TEXT, out, cap, marks, mark_cap, mark_count);
 }
 
 size_t eval_render_batch(EvalContext *ctx, wchar_t *out, size_t cap)
@@ -1886,6 +2044,7 @@ const wchar_t *parse_type_name(ParseRuleType t)
     case PARSE_SPLIT:    return L"分割取段";
     case PARSE_CONTAINS: return L"包含关键词";
     case PARSE_BETWEEN:  return L"取两标记之间";
+    case PARSE_REGEX:    return L"正则匹配";
     default:             return L"?";
     }
 }
@@ -1963,6 +2122,16 @@ void parse_rule_summary(const ParseRule *r, const Template *t, wchar_t *out, siz
                  r->marker_after[0] ? r->marker_after : L"末尾",
                  seg_name_by_id(t, r->target_segment_id),
                  r->fill_value[0] ? r->fill_value : L"(提取值)");
+    } else if (r->type == PARSE_REGEX) {
+        if (r->capture_group > 0)
+            swprintf(out, body_cap, L"正则「%ls」取第 %d 个捕获组 → %ls = 「%ls」",
+                     r->pattern, r->capture_group,
+                     seg_name_by_id(t, r->target_segment_id),
+                     r->fill_value[0] ? r->fill_value : L"(捕获内容)");
+        else
+            swprintf(out, body_cap, L"正则「%ls」取整体匹配 → %ls = 「%ls」",
+                     r->pattern, seg_name_by_id(t, r->target_segment_id),
+                     r->fill_value[0] ? r->fill_value : L"(整体匹配)");
     } else {
         swprintf(out, body_cap, L"包含「%ls」→ %ls = 「%ls」",
                  r->keyword, seg_name_by_id(t, r->target_segment_id),
@@ -2173,14 +2342,30 @@ int tmpl_lint(const Template *t, LintIssue *out, int cap)
             }
         }
 
-        /* 解析规则的目标变量已被删除 */
+        /* 解析规则的目标变量已被删除 / 正则模式写坏了 */
         ri = 0;
         for (p = s->parse_rules; p && n < cap; p = p->next, ++ri) {
-            if (tmpl_find_segment(t, p->target_segment_id)) continue;
-            swprintf(msg, QP_RESULT_MAX,
-                     L"第 %d 段（%ls）第 %d 条解析规则：目标变量已被删除，"
-                     L"这条规则不会生效。", si + 1, name, ri + 1);
-            lint_add(out, &n, LINT_PARSE_DANGLING, si, ri, msg);
+            if (!tmpl_find_segment(t, p->target_segment_id)) {
+                swprintf(msg, QP_RESULT_MAX,
+                         L"第 %d 段（%ls）第 %d 条解析规则：目标变量已被删除，"
+                         L"这条规则不会生效。", si + 1, name, ri + 1);
+                lint_add(out, &n, LINT_PARSE_DANGLING, si, ri, msg);
+            }
+            if (p->type == PARSE_REGEX && n < cap) {
+                int epos = -1;
+                if (!p->pattern[0]) {
+                    swprintf(msg, QP_RESULT_MAX,
+                             L"第 %d 段（%ls）第 %d 条解析规则是正则匹配，但没填"
+                             L"正则表达式，这条规则永远不会命中。", si + 1, name, ri + 1);
+                    lint_add(out, &n, LINT_PARSE_REGEX, si, ri, msg);
+                } else if (!qp_regex_valid(p->pattern, &epos)) {
+                    swprintf(msg, QP_RESULT_MAX,
+                             L"第 %d 段（%ls）第 %d 条解析规则的正则表达式在位置 %d 附近"
+                             L"无法解析，这条规则永远不会命中。",
+                             si + 1, name, ri + 1, epos + 1);
+                    lint_add(out, &n, LINT_PARSE_REGEX, si, ri, msg);
+                }
+            }
         }
 
         ri = 0;

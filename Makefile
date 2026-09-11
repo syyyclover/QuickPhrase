@@ -3,15 +3,15 @@
 #
 #  make            构建全部：程序 + 卸载器 + 安装包
 #  make app        只构建 build/QuickPhrase.exe
-#  make setup      构建安装包 dist/QuickPhrase-3.1.0-setup.exe
-#  make test       在本机（Linux/任意平台）编译并运行引擎/存储单元测试
+#  make setup      构建安装包 dist/QuickPhrase-3.3.0-setup.exe
+#  make test       在本机（Linux/任意平台）编译并运行引擎/存储/正则单元测试与正则差分验证
 #  make size       显示产物体积
 #  make clean
 #
 #  交叉编译工具链：MinGW-w64（x86_64-w64-mingw32-gcc）
 # ==============================================================
 
-VERSION   := 3.1.0
+VERSION   := 3.3.0
 CC        := x86_64-w64-mingw32-gcc
 WINDRES   := x86_64-w64-mingw32-windres
 STRIP     := x86_64-w64-mingw32-strip
@@ -29,9 +29,10 @@ LDFLAGS   := -mwindows -s -static -Wl,--gc-sections -ffunction-sections -fdata-s
 LIBS      := -luser32 -lgdi32 -lcomctl32 -lshell32 -ladvapi32 -lcomdlg32 \
              -luxtheme -lole32 -loleaut32 -luuid -ldwmapi
 
-APP_SRC   := src/main.c src/ui.c src/ui_dialogs.c src/engine.c src/storage.c src/cJSON.c \
-             src/launch.c
-APP_HDR   := src/app.h src/ui.h src/engine.h src/storage.h src/resource.h src/launch.h
+APP_SRC   := src/main.c src/ui.c src/ui_dialogs.c src/preview.c src/textview.c \
+             src/engine.c src/storage.c src/cJSON.c src/regex.c src/launch.c
+APP_HDR   := src/app.h src/ui.h src/engine.h src/storage.h src/resource.h src/launch.h \
+             src/regex.h src/preview.h src/textview.h
 APP_EXE   := $(BUILD)/QuickPhrase.exe
 UNI_EXE   := $(BUILD)/uninstall.exe
 
@@ -83,15 +84,22 @@ $(SETUP): installer/installer.c installer/setup_res.h $(BUILD)/setup.res | dirs
 
 # ---------------- 单元测试（纯 C，可在本机跑） ----------------
 test: dirs
+	$(HOSTCC) -std=gnu11 -O1 -g -Wall -Isrc -o $(BUILD)/test_textview \
+	    tests/test_textview.c src/textview.c
+	$(HOSTCC) -std=gnu11 -O1 -g -Wall -Isrc -o $(BUILD)/test_regex \
+	    tests/test_regex.c src/regex.c
 	$(HOSTCC) -std=gnu11 -O1 -g -Wall -Isrc -o $(BUILD)/test_engine \
-	    tests/test_engine.c src/engine.c
+	    tests/test_engine.c src/engine.c src/regex.c
 	$(HOSTCC) -std=gnu11 -O1 -g -Wall -Isrc -o $(BUILD)/test_storage \
-	    tests/test_storage.c src/engine.c src/storage.c src/cJSON.c
+	    tests/test_storage.c src/engine.c src/storage.c src/cJSON.c src/regex.c
 	$(HOSTCC) -std=gnu11 -O1 -g -Wall -Isrc -o $(BUILD)/test_launch \
 	    tests/test_launch.c src/launch.c
+	@$(BUILD)/test_textview
+	@$(BUILD)/test_regex
 	@$(BUILD)/test_engine
 	@$(BUILD)/test_storage
 	@$(BUILD)/test_launch
+	@python3 tests/regex_diff.py
 	@python3 .superpowers/sdd/2026-09-10-dual-text-table-output/task-4-preview.py
 	@python3 .superpowers/sdd/2026-09-10-dual-text-table-output/task-4-geometry.py
 
@@ -103,7 +111,7 @@ size:
 
 # 各编译单元的目标文件体积（看代码量都堆在哪儿，不产出可运行程序）
 objsize: dirs
-	@for f in main ui ui_dialogs engine storage cJSON; do \
+	@for f in main ui ui_dialogs preview textview engine storage cJSON regex; do \
 	    $(CC) $(CFLAGS) -ffunction-sections -fdata-sections \
 	        -c src/$$f.c -o $(BUILD)/objsize_$$f.o; done
 	@ls -l $(BUILD)/objsize_*.o | \

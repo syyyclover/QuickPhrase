@@ -3,6 +3,7 @@
  */
 #include "ui.h"
 #include "resource.h"
+#include "preview.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -110,6 +111,7 @@ COLORREF theme_ctl_bk(void)  { return g_dark ? CLR_DARK_CTL : CLR_LIGHT_CTL; }
 COLORREF theme_text(void)    { return g_dark ? CLR_DARK_TEXT : CLR_LIGHT_TEXT; }
 COLORREF theme_dim(void)     { return g_dark ? CLR_DARK_DIM : CLR_LIGHT_DIM; }
 COLORREF theme_accent(void)  { return g_dark ? CLR_DARK_ACCENT : CLR_LIGHT_ACCENT; }
+COLORREF theme_error(void)   { return g_dark ? CLR_DARK_ERROR : CLR_LIGHT_ERROR; }
 
 /* Win10+ 深色控件：uxtheme 的未文档化导出，按序号加载，不可用时静默降级 */
 typedef enum { APPMODE_DEFAULT = 0, APPMODE_ALLOWDARK = 1, APPMODE_FORCEDARK = 2,
@@ -2339,7 +2341,8 @@ static void ui_set_preview_hint(void)
 {
     if (!g_hHint || !g_ctx) return;
     if (g_previewMode == OUTPUT_TABLE) {
-        qp_set_text_if_diff(g_hHint, L"表格模式：复制后可直接粘贴到 Excel（Ctrl+Enter）");
+        qp_set_text_if_diff(g_hHint,
+            L"表格模式：红字「未匹配」= 这一列没取到值；Ctrl+Enter 复制后可粘贴到 Excel");
     } else if (g_fieldCount == 0) {
         qp_set_text_if_diff(g_hHint, L"文本模式：无需填写，Ctrl+Enter 可直接复制");
     } else {
@@ -2347,34 +2350,62 @@ static void ui_set_preview_hint(void)
     }
 }
 
-/* 预览与复制只走这一条最终渲染路径，避免批量开关或输出模式让两处内容分叉。 */
-static size_t ui_render_current(wchar_t *out, size_t cap)
+/* 预览与复制只走这一条最终渲染路径，避免批量开关或输出模式让两处内容分叉。
+   marks 只给预览用（复制传 NULL）——它记的是「该有值却空着」的位置，不影响
+   渲染出来的文本本身，所以预览与复制永远是同一份内容。 */
+static size_t ui_render_current(wchar_t *out, size_t cap,
+                                int *marks, int mark_cap, int *mark_count)
 {
     OutputMode mode;
+    int batch;
     if (out && cap) out[0] = L'\0';
+    if (mark_count) *mark_count = 0;
     if (!g_ctx) return 0;
 
     mode = ui_effective_output_mode(g_previewMode, ui_table_output_enabled(),
                                     g_curTmpl ? g_curTmpl->table_output_format : L"");
     g_previewMode = mode;
     eval_run(g_ctx);
-    if (g_ctx->tmpl && g_ctx->tmpl->batch_mode)
-        return eval_render_batch_mode(g_ctx, mode, out, cap);
+    batch = (g_ctx->tmpl && g_ctx->tmpl->batch_mode) ? 1 : 0;
+    if (mode == OUTPUT_TEXT) {
+        if (batch)
+            return eval_render_batch_text_marked(g_ctx, out, cap, marks, mark_cap,
+                                                 mark_count);
+        return eval_render_text_marked(g_ctx, out, cap, marks, mark_cap, mark_count);
+    }
+    if (batch) return eval_render_batch_mode(g_ctx, mode, out, cap);
     return eval_render_mode(g_ctx, mode, out, cap);
+}
+
+/* 按当前模式把渲染结果喂给预览控件：文本模式带「失败位置」，表格模式带格式串。
+   文本与表格只用这一个控件，切模式不会换控件，也就不会有位置/焦点漂移。 */
+static void ui_preview_show_result(const wchar_t *out, const int *marks, int nmarks)
+{
+    if (!g_hPreview) return;
+    if (g_previewMode == OUTPUT_TABLE && ui_table_mode_available()) {
+        qp_preview_set_mode(g_hPreview, QP_PREVIEW_TABLE);
+        qp_preview_set_table(g_hPreview, out ? out : L"",
+                             g_curTmpl ? g_curTmpl->table_output_format : NULL);
+    } else {
+        qp_preview_set_mode(g_hPreview, QP_PREVIEW_TEXT);
+        qp_preview_set_text(g_hPreview, out ? out : L"", marks, nmarks);
+    }
 }
 
 void ui_refresh_current(void)
 {
     wchar_t out[QP_OUTPUT_MAX];
+    int marks[256];
+    int nmarks = 0;
     if (!g_ctx) {
         ui_sync_preview_mode_controls();
-        if (g_hPreview) SetWindowTextW(g_hPreview, L"");
+        if (g_hPreview) qp_preview_clear(g_hPreview);
         return;
     }
     ui_sync_preview_mode_controls();
-    ui_render_current(out, QP_OUTPUT_MAX);
+    ui_render_current(out, QP_OUTPUT_MAX, marks, 256, &nmarks);
     ui_sync_controls();
-    if (g_hPreview) qp_set_text_if_diff(g_hPreview, out);
+    ui_preview_show_result(out, marks, nmarks);
     /* 规则互相覆盖、迭代跑满仍没收敛时说一句：否则界面只是安静地拿着中间态，
        人看到的结果说不清是哪一轮的（v2.1 修） */
     if (g_ctx->unstable) {
@@ -2398,7 +2429,7 @@ static void ui_select_template(Template *t)
 
     if (!t) {
         SetWindowTextW(g_hTitle, L"未选择模板");
-        SetWindowTextW(g_hPreview, L"");
+        if (g_hPreview) qp_preview_clear(g_hPreview);
         SetWindowTextW(g_hHint, L"在左侧选择一个模板开始生成口径");
         EnableWindow(g_hBtnCopy, FALSE);
         EnableWindow(g_hBtnReset, FALSE);
@@ -2820,7 +2851,7 @@ void ui_copy_current(void)
     wchar_t out[QP_OUTPUT_MAX];
     if (!g_ctx) return;
     ui_sync_preview_mode_controls();
-    ui_render_current(out, QP_OUTPUT_MAX);
+    ui_render_current(out, QP_OUTPUT_MAX, NULL, 0, NULL);
     if (!out[0]) {
         SetWindowTextW(g_hHint, g_previewMode == OUTPUT_TABLE
                        ? L"当前表格为空，没有可复制的内容"
@@ -2862,6 +2893,10 @@ void ui_theme_changed(void)
     qp_theme_children(g_hwndMain);
     if (g_hHost) qp_theme_children(g_hHost);
     if (g_hTabs) InvalidateRect(g_hTabs, NULL, TRUE);   /* 标签条也是自绘的 */
+    if (g_hPreview) {                                   /* 预览自绘，配色重取 */
+        dark_apply_window(g_hPreview);
+        qp_preview_theme_changed(g_hPreview);
+    }
     if (s_flushMenuThemes) s_flushMenuThemes();
 }
 
@@ -3286,10 +3321,10 @@ static LRESULT CALLBACK main_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         g_hPreviewTableMode = qp_create(L"Button", L"表格", BS_AUTORADIOBUTTON |
                                         WS_TABSTOP, 0,
                                         0, 0, 10, 10, hwnd, IDC_PREVIEW_MODE_TABLE);
-        g_hPreview = qp_create(L"Edit", L"",
-                               ES_MULTILINE | ES_READONLY | WS_VSCROLL | ES_AUTOVSCROLL | WS_GROUP,
-                               WS_EX_CLIENTEDGE, 0, 0, 10, 10, hwnd, IDC_PREVIEW);
-        SendMessageW(g_hPreview, WM_SETFONT, (WPARAM)g_fontMono, TRUE);
+        /* 口径预览：文本 / 表格共用一个自绘控件（见 preview.c），
+           失败处红字标出、表格按列对齐 */
+        g_hPreview = qp_preview_create(hwnd, IDC_PREVIEW, WS_EX_CLIENTEDGE);
+        dark_apply_window(g_hPreview);
 
         g_hBtnCopy = qp_create(L"Button", L"一键复制文本", BS_DEFPUSHBUTTON | WS_TABSTOP, 0,
                                0, 0, 10, 10, hwnd, IDC_BTN_COPY);
@@ -3801,6 +3836,8 @@ int ui_register_classes(void)
     wc.hbrBackground = NULL;
     wc.lpszClassName = CLS_TABS;
     if (!RegisterClassExW(&wc)) return 0;
+
+    if (!qp_preview_register_class(g_hInst)) return 0;
 
     return 1;
 }

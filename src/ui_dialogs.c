@@ -6,6 +6,8 @@
  */
 #include "ui.h"
 #include "resource.h"
+#include "regex.h"
+#include "preview.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -406,28 +408,40 @@ static const Segment *combo_selected_seg(HWND combo)
 static void parse_dlg_sync_enable(ParseDlgCtx *c)
 {
     int sel = (int)SendMessageW(c->hType, CB_GETCURSEL, 0, 0);
-    int is_split = (sel == 0), is_between = (sel == 2);
-    /* 分隔符 / 第几段：只有「按分隔符切割」用得上 */
+    int is_split = (sel == 0), is_between = (sel == 2), is_regex = (sel == 3);
+    /* 分隔符：只有「按分隔符切割」用得上 */
     EnableWindow(c->hDelim, is_split);
-    EnableWindow(c->hIndex, is_split);
     EnableWindow(c->hDelimLbl, is_split);
-    EnableWindow(c->hIndexLbl, is_split);
+    /* 第几段 / 捕获组：同一个输入框，切割与正则两种类型都用 */
+    EnableWindow(c->hIndex, is_split || is_regex);
+    EnableWindow(c->hIndexLbl, is_split || is_regex);
+    SetWindowTextW(c->hIndexLbl, is_regex ? L"捕获组：" : L"取第几段：");
+    SendMessageW(c->hIndex, EM_SETCUEBANNER, TRUE,
+                 (LPARAM)(is_regex ? L"0 = 整体匹配，1 = 第 1 个括号"
+                                   : L"从 1 开始"));
     /* 后标记：只有「取两标记之间」用得上 */
     EnableWindow(c->hMarkerAfter, is_between);
     EnableWindow(c->hMarkerAfterLbl, is_between);
-    /* 关键词一栏三种规则都有意义：分隔=可选命中词、包含=必填词、取两标记之间=前标记。
-       不禁用，只按类型改标签与提示语。 */
-    SetWindowTextW(c->hKeywordLbl, is_between ? L"前标记：" : L"命中关键词：");
+    /* 关键词一栏：切割=可选命中词、包含=必填词、取两标记之间=前标记、
+       正则=正则表达式本身。不禁用，只按类型改标签、提示语与提示行。 */
+    SetWindowTextW(c->hKeywordLbl,
+                   is_between ? L"前标记："
+                              : (is_regex ? L"正则表达式：" : L"命中关键词："));
     SendMessageW(c->hKeyword, EM_SETCUEBANNER, TRUE,
-                 (LPARAM)(is_between ? L"留空表示从头开始取"
-                                     : L"留空表示只要取到内容就算命中"));
+                 (LPARAM)(is_regex ? L"如 设备编号[:：]\\s*([A-Za-z0-9\\-]+)"
+                          : is_between ? L"留空表示从头开始取"
+                                       : L"留空表示只要取到内容就算命中"));
     SetWindowTextW(c->hTip,
-        is_between
+        is_regex
+          ? L"例：正则「设备编号[:：]\\s*([A-Za-z0-9\\-]+)」取第 1 个捕获组 → 把编号填到目标变量。"
+            L"支持 . * + ? {m,n} [] [^] () (?:) | ^ $ \\d \\w \\s 与 \\1 反向引用；"
+            L"匹配大小写不敏感；勾「逐段」可对多段话逐段各取一次、结果分行。"
+        : is_between
           ? L"例：源里「网络设备」之后、「经核查」之前 → 取出设备名填到目标变量。"
             L"勾「逐段」可对多段话逐段各取一次、结果分行。"
-        : is_split
-          ? L"例：设备编号按「-」切割取第 8 段，命中「DBS」→ 设备类型 填「存储服务器」。"
-          : L"例：内容里包含「硬件」→ 把目标变量填成指定值。");
+          : is_split
+            ? L"例：设备编号按「-」切割取第 8 段，命中「DBS」→ 设备类型 填「存储服务器」。"
+            : L"例：内容里包含「硬件」→ 把目标变量填成指定值。");
 }
 
 static LRESULT CALLBACK parse_dlg_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
@@ -457,9 +471,11 @@ static LRESULT CALLBACK parse_dlg_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
         SendMessageW(c->hType, CB_ADDSTRING, 0, (LPARAM)L"按分隔符切割取第 N 段");
         SendMessageW(c->hType, CB_ADDSTRING, 0, (LPARAM)L"包含关键词");
         SendMessageW(c->hType, CB_ADDSTRING, 0, (LPARAM)L"取两标记之间");
+        SendMessageW(c->hType, CB_ADDSTRING, 0, (LPARAM)L"正则表达式");
         SendMessageW(c->hType, CB_SETCURSEL,
                      c->rule->type == PARSE_CONTAINS ? 1 :
-                     c->rule->type == PARSE_BETWEEN ? 2 : 0, 0);
+                     c->rule->type == PARSE_BETWEEN ? 2 :
+                     c->rule->type == PARSE_REGEX ? 3 : 0, 0);
 
         lbl[1] = c->hDelimLbl = mk_label_r(hwnd, L"分隔符：", 0);
         c->hDelim = mk_edit(hwnd, IDC_RL_DELIM, 0);
@@ -467,13 +483,21 @@ static LRESULT CALLBACK parse_dlg_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
 
         lbl[2] = c->hIndexLbl = mk_label_r(hwnd, L"取第几段：", 0);
         c->hIndex = mk_edit(hwnd, IDC_RL_INDEX, ES_NUMBER);
-        _snwprintf(buf, 32, L"%d", c->rule->segment_index > 0 ? c->rule->segment_index : 1);
+        /* 同一个框：切割时填第几段，正则时填捕获组序号 */
+        if (c->rule->type == PARSE_REGEX)
+            _snwprintf(buf, 32, L"%d", c->rule->capture_group > 0
+                                          ? c->rule->capture_group : 0);
+        else
+            _snwprintf(buf, 32, L"%d",
+                       c->rule->segment_index > 0 ? c->rule->segment_index : 1);
         SetWindowTextW(c->hIndex, buf);
 
-        /* 命中关键词 / 前标记（同一控件，按类型改标签） */
+        /* 命中关键词 / 前标记 / 正则表达式（同一控件，按类型改标签） */
         lbl[3] = c->hKeywordLbl = mk_label_r(hwnd, L"命中关键词：", 0);
         c->hKeyword = mk_edit(hwnd, IDC_RL_KEYWORD, 0);
-        SetWindowTextW(c->hKeyword, c->rule->keyword);
+        SendMessageW(c->hKeyword, EM_SETLIMITTEXT, QP_PATTERN_MAX, 0);
+        SetWindowTextW(c->hKeyword, c->rule->type == PARSE_REGEX ? c->rule->pattern
+                                                                 : c->rule->keyword);
 
         /* 后标记：只在「取两标记之间」时可用 */
         lbl[4] = c->hMarkerAfterLbl = mk_label_r(hwnd, L"后标记：", 0);
@@ -538,7 +562,8 @@ static LRESULT CALLBACK parse_dlg_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
             wchar_t buf[QP_VALUE_MAX];
             const Segment *target = combo_selected_seg(c->hTarget);
             int sel = (int)SendMessageW(c->hType, CB_GETCURSEL, 0, 0);
-            int is_split = (sel == 0), is_contains = (sel == 1), is_between = (sel == 2);
+            int is_split = (sel == 0), is_contains = (sel == 1);
+            int is_between = (sel == 2), is_regex = (sel == 3);
 
             if (!target) {
                 qp_msgbox(hwnd, MB_OK | MB_ICONWARNING, L"提示",
@@ -551,21 +576,47 @@ static LRESULT CALLBACK parse_dlg_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
                 SetFocus(c->hDelim);
                 return 0;
             }
-            c->rule->type = is_split ? PARSE_SPLIT :
+            c->rule->type = is_regex  ? PARSE_REGEX  :
+                            is_split  ? PARSE_SPLIT  :
                             is_between ? PARSE_BETWEEN : PARSE_CONTAINS;
             qp_strlcpy(c->rule->delimiter, buf, QP_SEP_MAX);
             qp_get_text(c->hIndex, buf, QP_VALUE_MAX);
-            c->rule->segment_index = _wtoi(buf);
-            if (c->rule->segment_index <= 0) c->rule->segment_index = 1;
-            /* 关键词 = 命中词（分隔/包含）或前标记（取两标记之间） */
+            if (is_regex) {
+                c->rule->capture_group = _wtoi(buf);
+                if (c->rule->capture_group < 0) c->rule->capture_group = 0;
+                if (c->rule->capture_group >= QP_REGEX_MAX_GROUPS)
+                    c->rule->capture_group = QP_REGEX_MAX_GROUPS - 1;
+            } else {
+                c->rule->segment_index = _wtoi(buf);
+                if (c->rule->segment_index <= 0) c->rule->segment_index = 1;
+            }
+            /* 关键词一栏 = 命中词（分隔/包含）/ 前标记（取两标记之间）/ 正则本体 */
             qp_get_text(c->hKeyword, buf, QP_VALUE_MAX);
             qp_trim(buf);
-            qp_strlcpy(c->rule->keyword, buf, QP_KEYWORD_MAX);
-            if (is_contains && !buf[0]) {
-                qp_msgbox(hwnd, MB_OK | MB_ICONWARNING, L"提示",
-                          L"「包含关键词」规则必须填写关键词。");
-                SetFocus(c->hKeyword);
-                return 0;
+            if (is_regex) {
+                int epos = -1;
+                if (!buf[0]) {
+                    qp_msgbox(hwnd, MB_OK | MB_ICONWARNING, L"提示",
+                              L"请填写正则表达式。");
+                    SetFocus(c->hKeyword);
+                    return 0;
+                }
+                if (!qp_regex_valid(buf, &epos)) {
+                    qp_msgbox(hwnd, MB_OK | MB_ICONWARNING, L"正则表达式有误",
+                              L"正则表达式在位置 %d 附近无法解析，请检查括号、"
+                              L"方括号或量词是否配对。", epos + 1);
+                    SetFocus(c->hKeyword);
+                    return 0;
+                }
+                qp_strlcpy(c->rule->pattern, buf, QP_PATTERN_MAX);
+            } else {
+                qp_strlcpy(c->rule->keyword, buf, QP_KEYWORD_MAX);
+                if (is_contains && !buf[0]) {
+                    qp_msgbox(hwnd, MB_OK | MB_ICONWARNING, L"提示",
+                              L"「包含关键词」规则必须填写关键词。");
+                    SetFocus(c->hKeyword);
+                    return 0;
+                }
             }
             /* 后标记（仅取两标记之间用；其余类型留空不影响） */
             qp_get_text(c->hMarkerAfter, buf, QP_VALUE_MAX);
@@ -1107,16 +1158,40 @@ static Segment *ed_cur_seg(EditorCtx *c)
 static void ed_update_preview(EditorCtx *c)
 {
     wchar_t out[QP_OUTPUT_MAX];
-    EvalContext *ctx = eval_create(c->t);
+    int marks[256];
+    int nmarks = 0;
+    EvalContext *ctx;
+    int table, batch;
+
+    if (!c || !c->hPreview) return;
     out[0] = L'\0';
+    table = (c->previewMode == OUTPUT_TABLE) &&
+            c->t->table_output_enabled && c->t->table_output_format[0];
+    batch = c->t->batch_mode ? 1 : 0;
+
+    ctx = eval_create(c->t);
     if (ctx) {
         eval_run(ctx);
-        eval_render_batch_mode(ctx, c->previewMode == OUTPUT_TABLE
-                                    ? OUTPUT_TABLE : OUTPUT_TEXT,
-                               out, QP_OUTPUT_MAX);
+        if (table) {
+            if (batch) eval_render_batch_mode(ctx, OUTPUT_TABLE, out, QP_OUTPUT_MAX);
+            else       eval_render_mode(ctx, OUTPUT_TABLE, out, QP_OUTPUT_MAX);
+        } else {
+            /* 文本预览带「失败位置」，与主界面同一套口径 */
+            if (batch)
+                eval_render_batch_text_marked(ctx, out, QP_OUTPUT_MAX,
+                                              marks, 256, &nmarks);
+            else
+                eval_render_text_marked(ctx, out, QP_OUTPUT_MAX,
+                                        marks, 256, &nmarks);
+        }
         eval_destroy(ctx);
     }
-    qp_set_text_if_diff(c->hPreview, out);
+    /* 表格 / 文本共用一个自绘控件（与主界面同款样式） */
+    qp_preview_set_mode(c->hPreview, table ? QP_PREVIEW_TABLE : QP_PREVIEW_TEXT);
+    if (table)
+        qp_preview_set_table(c->hPreview, out, c->t->table_output_format);
+    else
+        qp_preview_set_text(c->hPreview, out, marks, nmarks);
 }
 
 /* 片段列表里显示的摘要；隐藏 / 多行 / 时间格式 / 引用都带个标记，
@@ -2430,10 +2505,8 @@ static LRESULT CALLBACK editor_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
         /* 底部 */
         c->hPreviewLbl = mk_label(hwnd, L"默认值预览", 0);
-        c->hPreview = qp_create(L"Edit", L"",
-                                ES_MULTILINE | ES_READONLY | WS_VSCROLL | ES_AUTOVSCROLL,
-                                WS_EX_CLIENTEDGE, 0, 0, 10, 10, hwnd, IDC_ED_PREVIEW);
-        SendMessageW(c->hPreview, WM_SETFONT, (WPARAM)g_fontMono, TRUE);
+        /* 与主界面同一个自绘预览控件：文本失败处标红、表格按列对齐 */
+        c->hPreview = qp_preview_create(hwnd, IDC_ED_PREVIEW, WS_EX_CLIENTEDGE);
         mk_btn(hwnd, L"保存", IDOK);
         mk_btn(hwnd, L"取消", IDCANCEL);
         SendMessageW(GetDlgItem(hwnd, IDOK), BM_SETSTYLE, BS_DEFPUSHBUTTON, TRUE);

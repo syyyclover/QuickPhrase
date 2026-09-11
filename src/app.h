@@ -23,7 +23,7 @@
 
 #define QP_APP_NAME    L"QuickPhrase"
 #define QP_APP_TITLE   L"口径生成器"
-#define QP_APP_VERSION L"3.1.0"
+#define QP_APP_VERSION L"3.3.0"
 
 /* ---------------------- 全局状态（定义在 main.c） ------------------ */
 extern HINSTANCE g_hInst;
@@ -53,12 +53,16 @@ extern UINT      g_msgRequestExit;/* RegisterWindowMessage：卸载程序请求�
 #define CLR_LIGHT_TEXT   RGB(28, 32, 38)
 #define CLR_LIGHT_DIM    RGB(96, 104, 116)
 #define CLR_LIGHT_ACCENT RGB(58, 102, 152)
+/* 匹配失败 / 出错提示用的红（深浅各一套） */
+#define CLR_DARK_ERROR   RGB(240, 128, 128)
+#define CLR_LIGHT_ERROR  RGB(198, 40, 40)
 
 COLORREF theme_bk(void);
 COLORREF theme_ctl_bk(void);
 COLORREF theme_text(void);
 COLORREF theme_dim(void);
 COLORREF theme_accent(void);
+COLORREF theme_error(void);     /* 失败 / 出错文字 */
 COLORREF theme_line(void);      /* 分隔条 / 细分隔线（ui.c 实现，编辑器也用） */
 
 /* ---------------------- main.c ------------------------------------ */
