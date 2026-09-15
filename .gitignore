@@ -30,15 +30,19 @@
 Thumbs.db
 desktop.ini
 
-# 不纳入版本库：单元测试与开发需求文档（本地保留）
-/tests/
+# 本地工具会话目录（superpowers 的过程记录、审查 diff，属于本机工作痕迹）
+/.superpowers/
+/.agents/
+
+# 开发需求文档（本地保留，不进版本库）
 /QuickPhrase.md
+# 说明：tests/ 已纳入版本库 —— make test 自给自足（验收夹具不在时会明确打印「跳过」）
 
 
 # 临时文件
 _review_diff.txt
 
-# 验收样例（tools/snapshot.sh 之外的用户自备输入；放 examples/ 下仍按名字忽略）
+# 验收样例（本机自备的真实告警输入；放 examples/ 下仍按名字忽略）
 示例.png
 示例.txt
 示例完整.txt

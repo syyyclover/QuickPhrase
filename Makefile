@@ -82,7 +82,9 @@ $(SETUP): installer/installer.c installer/setup_res.h $(BUILD)/setup.res | dirs
 	@cp $(APP_EXE) $(DIST)/QuickPhrase.exe
 	@$(MAKE) --no-print-directory size
 
-# ---------------- 单元测试（纯 C，可在本机跑） ----------------
+# ---------------- 单元测试（纯 C / Python，都在本机跑，不依赖 Windows） --------
+# 全部用例都在 tests/ 里，make test 自给自足；验收夹具（真实模板 JSON）不在时
+# 相关两组会明确打印「跳过」并计数，而不是伪装通过。
 test: dirs
 	$(HOSTCC) -std=gnu11 -O1 -g -Wall -Isrc -o $(BUILD)/test_textview \
 	    tests/test_textview.c src/textview.c
@@ -94,14 +96,19 @@ test: dirs
 	    tests/test_storage.c src/engine.c src/storage.c src/cJSON.c src/regex.c
 	$(HOSTCC) -std=gnu11 -O1 -g -Wall -Isrc -o $(BUILD)/test_launch \
 	    tests/test_launch.c src/launch.c
+	$(HOSTCC) -std=gnu11 -O1 -g -Wall -Isrc -o $(BUILD)/test_final_review \
+	    tests/test_final_review.c src/engine.c src/regex.c
 	@$(BUILD)/test_textview
 	@$(BUILD)/test_regex
 	@$(BUILD)/test_engine
 	@$(BUILD)/test_storage
 	@$(BUILD)/test_launch
+	@$(BUILD)/test_final_review
 	@python3 tests/regex_diff.py
-	@python3 .superpowers/sdd/2026-09-10-dual-text-table-output/task-4-preview.py
-	@python3 .superpowers/sdd/2026-09-10-dual-text-table-output/task-4-geometry.py
+	@python3 tests/preview_mode.py
+	@python3 tests/preview_geometry.py
+	@python3 tests/editor_geometry.py
+	@python3 tests/editor_interaction.py
 
 size:
 	@echo "--------------------------------------------"
