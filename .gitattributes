@@ -1,0 +1,15 @@
+# 行尾统一成 LF —— 请不要删。
+#
+# 为什么需要这个文件：
+#   本仓库同时在 Windows 与 Linux 上开发（Windows 目录是 VMware 共享目录，Linux 侧
+#   直接 make 编译）。Windows 版 git 默认 core.autocrlf=true，检出时会把文本文件写成
+#   CRLF；而 Linux 侧的 autocrlf 是关的。两边行尾不一致时，git diff 会把整个文件报成
+#   改动（实测 14756 行全变），真正的修改淹没在里面看不清，git diff --check 也会刷屏。
+#
+#   这里显式钉住：文本文件无论在哪台机器检出，工作区与版本库都用 LF。
+#   Windows 上的编辑器照常可以写 CRLF，提交时会被规范化回 LF，差异保持干净。
+* text=auto eol=lf
+
+# 二进制资源不做任何行尾 / 编码转换
+*.ico binary
+*.png binary

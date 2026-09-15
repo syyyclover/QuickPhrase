@@ -264,20 +264,34 @@ QuickPhrase/
 ├── installer/      安装程序 / 卸载程序
 ├── res/            图标与程序清单
 ├── tests/          本机自测（引擎、存储、正则、排版、启动策略）+ 正则差分验证
-├── tools/          mkicon.py（由 res/app.png 生成 .ico，构建不依赖）
-├── docs/           设计稿与实施计划（superpowers 格式）
-├── examples/       验收用的样例输入（示例告警、截图；不参与编译、不进安装包）
-├── data.json       一份真实的模板数据快照（仅作验收夹具，见下）
-├── QuickPhrase-模板.json  可供导入的模板文件
+├── tools/          mkicon.py（生成 .ico）、snapshot.sh（打版本快照）
+├── examples/       验收用的样例输入（示例告警、截图；本机自备，不进版本库）
 ├── README.md       本文件
 ├── QuickPhrase.md  开发需求与设计说明（本地保留，不进版本库）
 ├── Makefile        构建脚本
+├── .gitattributes  行尾统一 LF（见下）
 └── build/ dist/    构建中间件与产物（make clean 可清，不进版本库）
+         snapshots/ 版本快照（tools/snapshot.sh 生成，故意放在 build/ 之外）
 ```
 
-`data.json` 与 `QuickPhrase-模板.json` 是**验收夹具**：测试会读它们检查规则语义与
-表格输出，但它们**不会**被编进软件本体或安装包 —— 安装包只内置两个测试模板，
-应用首次运行时在 `%APPDATA%\QuickPhrase` 生成。
+### 关于行尾
+
+仓库同时在 Windows 与 Linux 上开发（Windows 目录是 VMware 共享目录，Linux 侧直接
+`make` 编译）。Windows 版 git 默认 `core.autocrlf=true`，检出时会把文本写成 CRLF，
+而 Linux 侧的 `autocrlf` 是关的 —— 两边行尾不一致时，`git diff` 会把整个文件报成
+改动（实测 14756 行全变），等于看不见真正的修改。所以 `.gitattributes` 里显式钉住
+`* text=auto eol=lf`：文本文件在版本库与工作区都统一 LF，两个平台看到的是同一份差异。
+
+### 关于验收夹具
+
+`data.json`、`QuickPhrase-模板.json`、`examples/示例完整.txt` 这些**真实业务模板与
+样例**不进版本库（按 `.gitignore` 忽略，也从版本库中移除了）：它们只在本机存在，
+供 `tests/` 里的验收用例读取。夹具不在时，那两组用例会明确打印「跳过」并计数，
+而不是报一堆失败，也不会假装通过。
+
+安装包与软件本体同样**只内置两个测试模板**（`软件版本发布说明口径` 与
+`复杂示例 · 违规处置通报`），应用首次运行时在 `%APPDATA%\QuickPhrase` 生成，
+不含任何业务模板。
 
 ## 7. 许可
 
