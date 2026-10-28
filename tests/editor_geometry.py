@@ -53,6 +53,8 @@ typedef struct Ctl {RECT rect; struct Ctl *parent; int visible,enabled,scrollbar
 typedef Ctl *HWND;
 typedef int HDWP;
 #define TRUE 1
+#define FALSE 0
+#define WM_SETREDRAW 0x000b
 #define GWL_STYLE 0
 #define WS_VISIBLE 1
 #define SW_SHOW 1
@@ -72,6 +74,8 @@ typedef int HDWP;
 #define RDW_NOERASE 2
 #define RDW_UPDATENOW 4
 #define RDW_ALLCHILDREN 8
+#define RDW_ERASE 16
+#define RDW_FRAME 32
 static int paint_flushes;
 #define ED_MIN_W 880
 #define ED_MIN_H 690
@@ -97,11 +101,12 @@ static int qp_defer(int d,HWND c,int x,int y,int w,int h) {
     c->rect=(RECT){x,y,x+w,y+h};return d;
 }
 static void ShowWindow(HWND c,int s){++shows;c->visible=s;}
+static int IsWindowVisible(HWND c){return c->visible;}
 static void ShowScrollBar(HWND c,int b,int s){(void)b;c->scrollbar=s;}
 static long GetWindowLongPtrW(HWND c,int what){(void)what;return c->visible?WS_VISIBLE:0;}
 static int EnableWindow(HWND c,int enabled){c->enabled=enabled;return 1;}
 static long SendMessageW(HWND c,unsigned msg,unsigned long wp,long lp){
-    (void)wp;(void)lp;if(msg==BM_GETCHECK)return c->checked;return 0;
+    (void)lp;if(msg==WM_SETREDRAW)c->visible=!!wp;if(msg==BM_GETCHECK)return c->checked;return 0;
 }
 static int ListView_GetColumnWidth(HWND c,int n){return c->widths[n];}
 static void ListView_SetColumnWidth(HWND c,int n,int w){++column_sets;c->widths[n]=w;}

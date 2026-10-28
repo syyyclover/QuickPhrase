@@ -1124,8 +1124,6 @@ static LRESULT CALLBACK editor_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 g_settings.editor_h = current.bottom - current.top;
             }
             ed_layout(c);
-            RedrawWindow(hwnd, NULL, NULL,
-                         RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
         }
         return 0;
 
@@ -1138,13 +1136,16 @@ static LRESULT CALLBACK editor_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_PRINTCLIENT:
     case WM_PAINT: {
         PAINTSTRUCT ps;
+        RECT rc;
         HDC hdc = msg == WM_PAINT ? BeginPaint(hwnd, &ps) : (HDC)wp;
         /* Erase/print must publish the same background and splitter as paint,
            without validating the pending paint region or changing the caller DC. */
-        if (msg != WM_PAINT) GetClientRect(hwnd, &ps.rcPaint);
-        if (hdc) {
-            RECT rc;
-            GetClientRect(hwnd, &rc);
+        GetClientRect(hwnd, &rc);
+        if (msg != WM_PAINT) {
+            if (GetClipBox(hdc, &ps.rcPaint) == ERROR) ps.rcPaint = rc;
+            else IntersectRect(&ps.rcPaint, &ps.rcPaint, &rc);
+        }
+        if (hdc && !IsRectEmpty(&ps.rcPaint)) {
             qp_draw_window_frame(hwnd, hdc, &ps.rcPaint,
                                  ed_splitter_y(rc.bottom) + ED_SPLIT_HIT / 2);
         }

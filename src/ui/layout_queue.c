@@ -84,6 +84,15 @@ HDWP qp_defer(HDWP batch, HWND h, int x, int y, int w, int height)
     e.hwnd = h; e.parent = GetParent(h);
     if (!GetWindowRect(h, &e.old)) return batch;
     if (e.parent) MapWindowPoints(NULL, e.parent, (POINT *)&e.old, 2);
+    /* Drop-down combos choose their closed height from the font. Reapplying
+       the logical row height makes them resize themselves back on every frame.
+       Their popup height is managed separately by qp_combo_dropdown_fix. */
+    if (height > 0 && e.old.bottom > e.old.top && height != e.old.bottom-e.old.top) {
+        wchar_t cls[16];
+        if (GetClassNameW(h,cls,16) && lstrcmpiW(cls,L"ComboBox")==0 &&
+            (GetWindowLongPtrW(h,GWL_STYLE)&3)>CBS_SIMPLE)
+            height=e.old.bottom-e.old.top;
+    }
     /* Last requested rectangle wins, including cancellation to the old one. */
     if (b) for (int i = 0; i < b->count; ++i) if (b->entries[i].hwnd == h) {
         e.old = b->entries[i].old;
@@ -94,7 +103,9 @@ HDWP qp_defer(HDWP batch, HWND h, int x, int y, int w, int height)
     if (e.old.left == x && e.old.top == y && e.old.right - e.old.left == w &&
         e.old.bottom - e.old.top == height) return batch;
     e.x = x; e.y = y; e.w = w; e.h = height;
-    e.flags = SWP_NOZORDER | SWP_NOACTIVATE;
+    /* Damage is queued explicitly below, including parent exposure and frames.
+       Suppress native intermediate paints until all nested layouts are placed. */
+    e.flags = SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOREDRAW;
     if (e.old.right - e.old.left != w || e.old.bottom - e.old.top != height)
         e.flags |= SWP_NOCOPYBITS;
     if (b && b->count == b->capacity) {

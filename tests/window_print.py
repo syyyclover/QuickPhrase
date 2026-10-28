@@ -41,6 +41,7 @@ static int hsplitter_y(int h){return h-120;}
 static int theme_line(void){return 2;}
 static int theme_bk(void){return 1;}
 static int GetClientRect(HWND h,RECT *r){(void)h;*r=(RECT){0,0,900,620};return 1;}
+static int IntersectRect(RECT *o,const RECT *a,const RECT *b){RECT r={a->left>b->left?a->left:b->left,a->top>b->top?a->top:b->top,a->right<b->right?a->right:b->right,a->bottom<b->bottom?a->bottom:b->bottom};if(r.right<=r.left||r.bottom<=r.top)r=(RECT){0};*o=r;return r.right>r.left;}
 static HDC CreateCompatibleDC(HDC d){(void)d;buffer=0;return fail==1?NULL:&buffer;}
 static HBITMAP CreateCompatibleBitmap(HDC d,int w,int h){(void)d;(void)w;(void)h;return fail==2?NULL:(void *)1;}
 static HGDIOBJ SelectObject(HDC d,HGDIOBJ o){(void)d;(void)o;return (void *)1;}

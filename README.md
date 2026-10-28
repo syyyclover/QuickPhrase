@@ -12,14 +12,16 @@
 
 ## 1. 交付物
 
+本轮已停止继续优化，当前交接状态见[最终交接记录](docs/3.5.0-final-handoff-20261028.md)。编辑器外框缩放仍不及主界面流畅，此项未完全解决。
+
 | 文件 | 说明 |
 | --- | --- |
-| `dist/editor-maximize-20261028/QuickPhrase-3.5.0-setup.exe` | 当前验证过的 **3.5.0 安装包**（内嵌主程序与卸载器） |
-| `dist/editor-maximize-20261028/QuickPhrase.exe` | 当前验证过的免安装绿色版主程序 |
+| `dist/editor-combo-layout-20261028/QuickPhrase-3.5.0-setup.exe` | 当前验证过的 **3.5.0 安装包**（内嵌主程序与卸载器） |
+| `dist/editor-combo-layout-20261028/QuickPhrase.exe` | 当前验证过的免安装绿色版主程序 |
 
-2026-10-28 已清理旧版发布产物，当前交付以表中目录为准，校验值见该目录的 `SHA256SUMS`。
+2026-10-28 已将旧版发布产物集中归档，当前交付以表中目录为准，校验值见该目录的 `SHA256SUMS`。旧文件因自动审批阻止删除而保留于本地 `.local-notes/`，不上传 GitHub。
 三个问题的原因、修正及目录说明见 [修复总结与目录整理](docs/3.5.0-cleanup-20261028.md)，
-编辑器最大化修复和平台限制见 [编辑器绘制修正记录](docs/3.5.0-editor-maximize-20261028.md)。
+编辑器拉伸卡顿补修和验证限制见 [编辑器性能修正记录](docs/3.5.0-editor-combo-layout-20261028.md)。
 以后执行默认 `make setup` 仍按 Makefile 约定在 `dist/` 根目录生成新安装包；构建输出不自动代表已经完成视觉验收。
 
 安装包只写 `HKEY_CURRENT_USER` 与用户目录，**不需要管理员权限、不弹 UAC**，

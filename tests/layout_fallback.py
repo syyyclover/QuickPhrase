@@ -20,14 +20,21 @@ preamble = r'''
 #include <stdlib.h>
 #include <string.h>
 #include <assert.h>
+#include <wchar.h>
 typedef void *HDWP;
 typedef struct { int left,top,right,bottom; } RECT;
 typedef struct { int x,y; } POINT;
 typedef struct Window { RECT rect; } *HWND;
 typedef unsigned UINT;
+#define GWL_STYLE 0
+#define CBS_SIMPLE 1
+static int GetClassNameW(HWND h,wchar_t *name,int cap){(void)h;(void)cap;wcscpy(name,L"Edit");return 1;}
+static int lstrcmpiW(const wchar_t *a,const wchar_t *b){return wcscmp(a,b);}
+static int GetWindowLongPtrW(HWND h,int index){(void)h;(void)index;return 0;}
 #define SWP_NOZORDER 1
 #define SWP_NOACTIVATE 2
 #define SWP_NOCOPYBITS 4
+#define SWP_NOREDRAW 256
 #define RDW_INVALIDATE 8
 #define RDW_ERASE 16
 #define RDW_FRAME 32

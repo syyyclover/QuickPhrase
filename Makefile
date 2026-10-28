@@ -37,7 +37,7 @@ TEST_BINS := $(addprefix $(BUILD)/test_,$(TEST_NAMES))
 .SECONDARY: $(HOST_OBJ) $(APP_OBJ) $(INSTALL_OBJ)
 PY_TESTS := regex_diff preview_mode preview_geometry editor_geometry editor_interaction \
             lookup_geometry lookup_interaction preview_table_width table_dialog_repaint storage_atomic layout_fallback input_limits ui_data_transactions preview_allocations manifest_validation icon_resources rule_transactions condition_transactions session_transactions field_command_lifetime settings_transactions autostart_snapshot theme_transactions layout_damage paint_failures static_paint_failures window_workarea table_cache_race copy_status ui_copy_audit preview_refresh editor_preview_context session_actions modal_viewport popup_limits editor_commit installer_extract startup_palette preview_publication lookup_columns resizable_viewport window_transitions table_insert window_print preview_clip editor_time_selection custom_choice_interaction custom_choice_dispatch custom_choice_sync popup_cursor host_erase_repaint window_erase_repaint crash_report choice_realign
-PY_TESTS += editor_wheel window_show restore_publication editor_resize editor_paint
+PY_TESTS += editor_wheel window_show restore_publication editor_resize editor_paint editor_resize_cost column_resize_paint
 APP_EXE := $(BUILD)/QuickPhrase.exe
 UNI_EXE := $(BUILD)/uninstall.exe
 SETUP := $(DIST)/QuickPhrase-$(VERSION)-setup.exe

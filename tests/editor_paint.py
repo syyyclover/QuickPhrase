@@ -27,15 +27,19 @@ typedef struct {RECT rcPaint;} PAINTSTRUCT;
 #define ED_SPLIT_HIT 8
 #define DPIX(x) (x)
 #define SRCCOPY 1
-static int fail,buffer,filled,blits,begins,ends;
+#define ERROR 0
+static int fail,buffer,filled,blits,begins,ends,clip_mode,dc_allocs;
 static HBRUSH g_brushBk=(void *)1;
 static int ed_splitter_y(int h){return h-80;}
 static int theme_line(void){return 2;}
 static int GetClientRect(HWND h,RECT *r){(void)h;*r=(RECT){0,0,800,600};return 1;}
+static int GetClipBox(HDC h,RECT *r){(void)h;*r=clip_mode==1?(RECT){-10,-20,900,700}:clip_mode==2?(RECT){900,700,950,800}:(RECT){11,17,51,47};return 2;}
+static int IntersectRect(RECT *o,const RECT *a,const RECT *b){RECT r={a->left>b->left?a->left:b->left,a->top>b->top?a->top:b->top,a->right<b->right?a->right:b->right,a->bottom<b->bottom?a->bottom:b->bottom};if(r.right<=r.left||r.bottom<=r.top)r=(RECT){0};*o=r;return r.right>r.left;}
+static int IsRectEmpty(const RECT *r){return r->right<=r->left||r->bottom<=r->top;}
 static HDC BeginPaint(HWND h,PAINTSTRUCT *p){(void)h;++begins;p->rcPaint=(RECT){11,17,700,500};static int target;return &target;}
 static int EndPaint(HWND h,PAINTSTRUCT *p){(void)h;(void)p;++ends;return 1;}
-static HDC CreateCompatibleDC(HDC h){(void)h;buffer=0;return fail==1?NULL:&buffer;}
-static HBITMAP CreateCompatibleBitmap(HDC h,int w,int y){(void)h;(void)w;(void)y;return fail==2?NULL:(void *)2;}
+static HDC CreateCompatibleDC(HDC h){(void)h;++dc_allocs;buffer=0;return fail==1?NULL:&buffer;}
+static HBITMAP CreateCompatibleBitmap(HDC h,int w,int y){(void)h;assert((w==40 && y==30) || (w==689 && y==483) || (w==800 && y==600));return fail==2?NULL:(void *)2;}
 static HGDIOBJ SelectObject(HDC h,HGDIOBJ o){(void)h;(void)o;return (void *)3;}
 static int SetViewportOrgEx(HDC h,int x,int y,void *p){(void)h;(void)x;(void)y;(void)p;return 1;}
 static int FillRect(HDC h,const RECT *r,HBRUSH b){assert(h&&b);(void)r;++filled;*h=1;return 1;}
@@ -51,22 +55,42 @@ static LRESULT root_dispatch(int msg,HDC dc){HWND hwnd=(void *)1;WPARAM wp=(WPAR
 driver = r'''
 }return -1;}
 int main(void){
+ { RECT flat[]={{0,0,800,524},{0,525,800,600},{0,524,12,525},{788,524,800,525}};
+   for(int i=0;i<4;++i){int target=0;filled=blits=dc_allocs=0;
+    qp_draw_window_frame((void *)1,&target,&flat[i],524);
+    assert(target && filled==1 && !dc_allocs && !blits);
+   }
+ }
  for(fail=0;fail<4;fail++)for(int msg=1;msg<=3;msg++){
-  int target=0;filled=blits=begins=ends=0;
+  int target=0;filled=blits=begins=ends=dc_allocs=0;
   assert(root_dispatch(msg,&target)==(msg==WM_ERASEBKGND));
   assert(filled>=1); /* A successful erase cannot leave an untouched black DC. */
+  assert(!dc_allocs && !blits && filled==1); /* Flat regions need one fill only. */
   assert(begins==(msg==WM_PAINT) && ends==begins);
   if(msg!=WM_PAINT)assert(target);
   if(fail==1 || fail==2)assert(!blits);
  }
+ clip_mode=1;
+ for(fail=0;fail<4;fail++){
+  int target=0;filled=blits=dc_allocs=0;
+  root_dispatch(WM_ERASEBKGND,&target);
+  assert(target && dc_allocs==1 && filled==(fail==3?1:2));
+  assert(blits==((fail==1 || fail==2)?0:1));
+ }
+ for(clip_mode=1;clip_mode<=2;clip_mode++){int target=0;fail=0;filled=blits=0;root_dispatch(WM_PRINTCLIENT,&target);assert(clip_mode==2?!filled:filled>0);}
  for(int msg=1;msg<=3;msg++){
-  int target=0;filled=begins=ends=0;
+  int target=0;filled=begins=ends=dc_allocs=blits=0;
   assert(host_dispatch(msg,&target)==(msg==WM_ERASEBKGND));assert(filled==1);
   assert(begins==(msg==WM_PAINT) && ends==begins);
+  assert(!dc_allocs && !blits);
  }
 }
 '''
 main = (root/'src/ui/main_window.c').read_text(encoding='utf-8')
+paint = (root/'src/ui/text_paint.c').read_text(encoding='utf-8')
+a=paint.index('void qp_paint_background(');b=paint.index('\nstatic LRESULT CALLBACK buffered_static',a)
+start=pre.index('static void qp_paint_background(');end=pre.index('static LRESULT root_dispatch',start)
+pre=pre[:start]+paint[a:b]+pre[end:]
 a=main.index('void qp_draw_window_frame(');b=main.index('\nstatic void main_draw_client',a)
 renderer=main[a:b]
 extra='\n#define QP_SPLIT_HIT 8\n#define QP_HSPLIT_HIT 8\nstatic int splitter_x(void){return 150;}\nstatic int hsplitter_y(int h){return h-120;}\n'

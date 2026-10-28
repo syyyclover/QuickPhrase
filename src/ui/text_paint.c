@@ -12,7 +12,18 @@ void qp_show_if_needed(HWND h,int visible)
 void qp_set_column_width_if_needed(HWND h,int col,int width)
 {
     if(width<0) width=0;
-    if(h && ListView_GetColumnWidth(h,col)!=width) ListView_SetColumnWidth(h,col,width);
+    if(h && ListView_GetColumnWidth(h,col)!=width) {
+        /* LVM_SETCOLUMNWIDTH paints synchronously even while the surrounding
+           geometry queue is still being laid out. Leave one pending repaint
+           for the layout's final flush. Never enable a hidden/suspended list. */
+        int visible=IsWindowVisible(h);
+        if(visible) SendMessageW(h,WM_SETREDRAW,FALSE,0);
+        ListView_SetColumnWidth(h,col,width);
+        if(visible) {
+            SendMessageW(h,WM_SETREDRAW,TRUE,0);
+            RedrawWindow(h,NULL,NULL,RDW_INVALIDATE|RDW_ERASE|RDW_FRAME|RDW_ALLCHILDREN);
+        }
+    }
 }
 
 void qp_set_scroll_info_if_needed(HWND h,int bar,const SCROLLINFO *info)
@@ -68,24 +79,13 @@ void qp_draw_background(HWND h,HDC dc)
     FillRect(dc,&rc,g_brushBk);
 }
 
-/* Shared background painter for custom hosts. Child HWNDs stay clipped. */
+/* A flat host has no foreground to composite: one fill is the complete frame.
+   Child HWNDs and the update region remain clipped by the paint DC. */
 void qp_paint_background(HWND h)
 {
-    PAINTSTRUCT ps; RECT rc; HDC dc=BeginPaint(h,&ps), mem=NULL, target=dc;
-    HBITMAP bitmap=NULL; HGDIOBJ old=NULL;
+    PAINTSTRUCT ps; HDC dc=BeginPaint(h,&ps);
     if(!dc) return;
-    GetClientRect(h,&rc);
-    if(rc.right>0 && rc.bottom>0) {
-        mem=CreateCompatibleDC(dc);
-        if(mem) bitmap=CreateCompatibleBitmap(dc,rc.right,rc.bottom);
-        if(bitmap) { old=SelectObject(mem,bitmap); target=mem; }
-        qp_draw_background(h,target);
-        if(bitmap) {
-            BitBlt(dc,0,0,rc.right,rc.bottom,mem,0,0,SRCCOPY);
-            SelectObject(mem,old); DeleteObject(bitmap);
-        }
-        if(mem) DeleteDC(mem);
-    }
+    qp_draw_background(h,dc);
     EndPaint(h,&ps);
 }
 

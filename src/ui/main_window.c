@@ -135,6 +135,16 @@ void qp_draw_window_frame(HWND hwnd,HDC hdc,const RECT *area,int editorY)
     int cw = clip.right - clip.left, ch = clip.bottom - clip.top;
     int one = DPIX(1) > 1 ? DPIX(1) : 1;
     GetClientRect(hwnd, &rc);
+    /* Themed child controls ask their parent for small background regions.
+       Outside the editor divider this is a single solid fill, already atomic;
+       allocating and copying an offscreen bitmap adds no visual protection. */
+    if (editorY >= 0) {
+        bar = (RECT){DPIX(12), editorY, rc.right - DPIX(12), editorY + one};
+        if (!IntersectRect(&bar, &bar, &clip)) {
+            FillRect(hdc, &clip, g_brushBk);
+            return;
+        }
+    }
     /* 背景与分隔条在离屏位图上一趟画完再整块贴上。
        以前是 WM_ERASEBKGND 先把背景涂一遍、WM_PAINT 再把线画上去，屏幕上
        就是「条子被涂掉 → 条子又出现」两步；拖动时每格都来一次，看起来
@@ -158,9 +168,7 @@ void qp_draw_window_frame(HWND hwnd,HDC hdc,const RECT *area,int editorY)
        可以拖，拖起来自然没有「抓住了」的感觉。 */
     if (b) {
         if (editorY >= 0) {
-            bar.left = DPIX(12); bar.right = rc.right - DPIX(12);
-            bar.top = editorY; bar.bottom = editorY + one;
-            if (bar.right > bar.left) FillRect(dc, &bar, b);
+            FillRect(dc, &bar, b);
         } else {
         bar.left   = splitter_x() + QP_SPLIT_HIT / 2;
         bar.right  = bar.left + one;
