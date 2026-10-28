@@ -215,10 +215,10 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, LPWSTR cmdline, int nShow)
             return 0;
         {
             int r = MessageBoxW(NULL,
-                               L"是否同时删除模板与设置数据？\n\n"
-                               L"「是」：一并删除 %APPDATA%\\QuickPhrase（模板全部丢失）\n"
-                               L"「否」：保留数据，重装后模板仍在\n"
-                               L"「取消」：不卸载",
+                               L"是否删除默认目录中的模板与设置数据？\n\n"
+                               L"「是」：删除 %APPDATA%\\QuickPhrase 中的数据（不可恢复）\n"
+                               L"「否」：保留默认目录中的数据\n"
+                               L"「取消」：不卸载；自定义数据目录不在本次删除范围内",
                                QP_PRODUCT, MB_YESNOCANCEL | MB_ICONQUESTION);
             if (r == IDCANCEL) return 0;
             purge = (r == IDYES);

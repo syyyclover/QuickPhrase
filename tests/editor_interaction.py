@@ -1,3 +1,4 @@
+from source_helpers import read_source, INCLUDE_FLAGS, CORE_SOURCES
 """Exercise extracted editor combo insertion and dialog-group helper behavior.
 
 This is source-executed evidence for model-backed combo refresh and the Win32
@@ -10,10 +11,10 @@ import sys
 import tempfile
 
 repo = pathlib.Path(__file__).resolve().parents[1]
-source = (repo / "src/ui_dialogs.c").read_text()
+source = read_source("ui_dialogs.c")
 
 def function(name, required=True):
-    match = re.search(r"static [^\n]+\b" + name + r"\([^;]+?\)\n\{", source)
+    match = re.search(r"(?:static )?[^\n]+\b" + name + r"\([^;]+?\)\n\{", source)
     if not match:
         if required:
             print("RED: missing production helper " + name)
@@ -31,6 +32,7 @@ combo_preamble = r'''
 #include <wchar.h>
 #include "engine.h"
 #include "resource.h"
+typedef unsigned long DWORD;
 typedef unsigned long WPARAM;
 typedef long LPARAM;
 typedef struct Ctl {
@@ -47,6 +49,9 @@ typedef Ctl *HWND;
 #define CB_SETCURSEL 0x014E
 #define CB_GETCURSEL 0x0147
 #define CB_GETITEMDATA 0x0150
+#define EM_GETSEL 0x00B0
+#define MB_OK 1
+#define MB_ICONWARNING 2
 #define EM_REPLACESEL 0x00C2
 #define TRUE 1
 #define _snwprintf swprintf
@@ -62,11 +67,14 @@ static long SendMessageW(HWND h, unsigned msg, WPARAM wp, LPARAM lp) {
     case CB_SETCURSEL: h->sel=(int)wp;return h->sel;
     case CB_GETCURSEL: return h->sel;
     case CB_GETITEMDATA: return (long)h->data[wp];
+    case EM_GETSEL: *(DWORD *)wp=*(DWORD *)lp=(DWORD)wcslen(h->text);return 0;
     case EM_REPLACESEL:
         wcsncat(h->text, (const wchar_t *)lp, QP_OUTPUT_MAX-wcslen(h->text)-1);return 0;
     default: return 0;
     }
 }
+static int GetWindowTextLengthW(HWND h){return (int)wcslen(h->text);}
+static void qp_msgbox(HWND h,int flags,const wchar_t *title,const wchar_t *text){(void)h;(void)flags;(void)title;(void)text;++failures;}
 static void SetFocus(HWND h) {(void)h;}
 '''
 
@@ -104,10 +112,10 @@ int main(void) {
 combo_code = (combo_preamble + ctx +
               "\nstatic void ed_table_format_changed(EditorCtx *c) {(void)c;}\n" +
               function("combo_selected_seg") +
-              function("ed_fill_table_combo") + function("ed_insert_table_variable") + combo_driver)
+              function("ed_fill_table_combo") + function("ed_insert_table_text") + function("ed_insert_table_variable") + combo_driver)
 with tempfile.TemporaryDirectory(prefix="qp-task3-interaction-") as tmp:
     exe = pathlib.Path(tmp) / "combo"
-    result = subprocess.run(["cc", "-std=gnu11", "-O0", "-I", str(repo / "src"), "-x", "c", "-", "-o", str(exe)], input=combo_code, text=True)
+    result = subprocess.run(["cc", "-std=gnu11", "-O0", *INCLUDE_FLAGS, "-x", "c", "-", "-o", str(exe)], input=combo_code, text=True)
     if result.returncode:
         sys.exit(result.returncode)
     result = subprocess.run([str(exe)])

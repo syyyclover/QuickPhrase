@@ -16,6 +16,7 @@
 用法： python3 tests/regex_diff.py [每档用例数]
 """
 import pathlib
+from source_helpers import read_source, INCLUDE_FLAGS, CORE_SOURCES
 import random
 import re
 import subprocess
@@ -186,8 +187,8 @@ def expected_line(idx, m):
 def compile_probe(tmpdir):
     probe = pathlib.Path(tmpdir) / "probe"
     build = subprocess.run(
-        ["cc", "-std=gnu11", "-O1", "-Wall", "-Wextra", "-I", str(ROOT / "src"),
-         str(ROOT / "tests/regex_probe.c"), str(ROOT / "src/regex.c"),
+        ["cc", "-std=gnu11", "-O1", "-Wall", "-Wextra", *INCLUDE_FLAGS,
+         str(ROOT / "tests/regex_probe.c"), str(ROOT / "src/core/regex.c"),
          "-o", str(probe)],
         capture_output=True, text=True,
     )

@@ -17,6 +17,8 @@
 *.a
 *.lib
 *.pdb
+__pycache__/
+*.pyc
 
 # 本地工具/编辑器配置
 /.claude/

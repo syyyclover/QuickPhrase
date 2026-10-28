@@ -1,84 +1,34 @@
-# -*- coding: utf-8 -*-
-"""生成应用图标：蓝灰圆角方块 + 白色对话气泡（内含三条文本线）"""
-from PIL import Image, ImageDraw
+"""Package the committed image-model artwork as multi-resolution Windows icons."""
+from pathlib import Path
+from PIL import Image
 
-BG_TOP    = (74, 116, 165)
-BG_BOTTOM = (46, 74, 110)
-FG        = (255, 255, 255)
-ACCENT    = (168, 202, 240)
+ROOT = Path(__file__).resolve().parents[1]
+SIZES = (16, 20, 24, 32, 40, 48, 64, 128, 256)
 
-S = 1024  # 超采样画布
+def package(name):
+    source = ROOT / "res/icons" / (name + "-master.png")
+    master = Image.open(source).convert("RGBA")
+    alpha = master.getchannel("A")
+    if alpha.getextrema()[0] != 0 or alpha.getbbox() is None:
+        raise ValueError(f"{source}: transparent master required")
+    # Normalize transparent padding while retaining the original AI artwork.
+    art = master.crop(alpha.getbbox())
+    side = max(art.size)
+    canvas = Image.new("RGBA", (side, side), (0, 0, 0, 0))
+    canvas.alpha_composite(art, ((side - art.width) // 2, (side - art.height) // 2))
+    frames = []
+    for size in SIZES:
+        inset = max(1, round(size * 0.09))
+        frame = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+        frame.alpha_composite(canvas.resize((size - inset * 2, size - inset * 2), Image.Resampling.LANCZOS), (inset, inset))
+        frames.append(frame)
+    target = ROOT / "res" / (name + ".ico")
+    frames[-1].save(target, format="ICO", sizes=[(s, s) for s in SIZES], append_images=frames[:-1])
+    with Image.open(target) as check:
+        if check.ico.sizes() != {(s, s) for s in SIZES}:
+            raise ValueError(f"{target}: missing icon resolutions")
+    print(f"{target.relative_to(ROOT)}: {len(SIZES)} resolutions")
 
-
-def rounded_mask(size, radius):
-    m = Image.new("L", (size, size), 0)
-    d = ImageDraw.Draw(m)
-    d.rounded_rectangle([0, 0, size - 1, size - 1], radius=radius, fill=255)
-    return m
-
-
-def draw_base():
-    img = Image.new("RGBA", (S, S), (0, 0, 0, 0))
-    grad = Image.new("RGBA", (1, S))
-    gp = grad.load()
-    for y in range(S):
-        t = y / (S - 1)
-        gp[0, y] = (
-            int(BG_TOP[0] + (BG_BOTTOM[0] - BG_TOP[0]) * t),
-            int(BG_TOP[1] + (BG_BOTTOM[1] - BG_TOP[1]) * t),
-            int(BG_TOP[2] + (BG_BOTTOM[2] - BG_TOP[2]) * t),
-            255,
-        )
-    grad = grad.resize((S, S))
-    img.paste(grad, (0, 0), rounded_mask(S, int(S * 0.19)))
-    return img
-
-
-def draw_bubble(img, simple=False):
-    d = ImageDraw.Draw(img)
-    L, T, R, B = int(S * 0.17), int(S * 0.21), int(S * 0.83), int(S * 0.65)
-    d.rounded_rectangle([L, T, R, B], radius=int(S * 0.10), fill=FG)
-    d.polygon([(int(S * 0.30), B - int(S * 0.02)),
-               (int(S * 0.30), int(S * 0.82)),
-               (int(S * 0.50), B - int(S * 0.02))], fill=FG)
-    if simple:
-        return
-    lh = int(S * 0.072)
-    x0 = L + int(S * 0.09)
-    ys = [T + int(S * 0.10), T + int(S * 0.10) + int(S * 0.125),
-          T + int(S * 0.10) + int(S * 0.25)]
-    widths = [0.54, 0.44, 0.30]
-    for i, (y, w) in enumerate(zip(ys, widths)):
-        d.rounded_rectangle([x0, y, x0 + int(S * w), y + lh],
-                            radius=lh // 2,
-                            fill=BG_BOTTOM if i < 2 else ACCENT)
-
-
-def render(size):
-    img = draw_base()
-    draw_bubble(img, simple=(size <= 20))
-    return img.resize((size, size), Image.LANCZOS)
-
-
-sizes = [16, 20, 24, 32, 40, 48, 64, 128, 256]
-imgs = [render(s) for s in sizes]
-imgs[-1].save("/root/QuickPhrase/res/app.ico", format="ICO",
-              sizes=[(s, s) for s in sizes])
-render(256).save("/root/QuickPhrase/res/app.png")
-
-# 安装程序图标：同底色，白色向下箭头 + 底座
-inst = draw_base()
-d = ImageDraw.Draw(inst)
-cx = S // 2
-d.rounded_rectangle([cx - int(S * 0.075), int(S * 0.20),
-                     cx + int(S * 0.075), int(S * 0.56)],
-                    radius=int(S * 0.03), fill=FG)
-d.polygon([(cx - int(S * 0.20), int(S * 0.52)),
-           (cx + int(S * 0.20), int(S * 0.52)),
-           (cx, int(S * 0.76))], fill=FG)
-d.rounded_rectangle([int(S * 0.22), int(S * 0.80),
-                     int(S * 0.78), int(S * 0.86)],
-                    radius=int(S * 0.03), fill=ACCENT)
-inst.save("/root/QuickPhrase/res/setup.ico", format="ICO",
-          sizes=[(s, s) for s in sizes])
-print("ok")
+if __name__ == "__main__":
+    for name in ("app", "setup"):
+        package(name)

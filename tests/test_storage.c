@@ -1,5 +1,5 @@
-#include "../src/storage.h"
-#include "../src/cJSON.h"
+#include "storage.h"
+#include "cJSON.h"
 #include <locale.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -775,6 +775,14 @@ int main(void){
     AppData *m=appdata_from_json("{\"templates\":[{\"name\":\"仅名字\"}]}");
     ck(m&&m->templates&&m->templates->id[0]!=0,"缺失 id 自动生成");
     cks(m->templates->name,L"仅名字","缺字段模板可读"); appdata_free(m); }
+  {
+    AppData *d=appdata_create_seed();
+    storage_set_data_dir(L"/tmp/qp-storage-350-quote'case");
+    ck(storage_save(d)==1,"数据目录包含单引号时正常保存，不经 shell 拼接");
+    appdata_free(d);
+    storage_set_data_dir(NULL);
+    remove("/tmp/qp-storage-350-quote'case/data.json");
+  }
   /* 文件读写 + 导入导出 */
   { AppData *d=appdata_create_seed(); AppData *d2=appdata_create(); int a=0,u=0;
     remove("/tmp/quickphrase-storage-test/data.json");
@@ -794,6 +802,34 @@ int main(void){
     a=u=0; storage_import(d2,L"/tmp/quickphrase-storage-test/export.json",QP_IMPORT_REPLACE,&a,&u);
     ck(tmpl_list_count(d2->templates)==2,"覆盖导入后仅剩文件内模板");
     ck(storage_import(d2,L"/tmp/quickphrase-storage-test/missing.json",QP_IMPORT_MERGE,&a,&u)==0,"导入不存在文件返回失败");
+    {
+      const char *bad[]={"null","[]","{\"templates\":\"bad\"}","{\"groups\":null}","{\"dataTables\":42}","{} trailing"};
+      size_t i;
+      for(i=0;i<sizeof(bad)/sizeof(bad[0]);++i) {
+        AppData *invalid=appdata_from_json(bad[i]);
+        ck(invalid==NULL,"错误根类型、集合类型或尾随内容必须拒绝"); appdata_free(invalid);
+        storage_write_text(L"/tmp/quickphrase-storage-test/export.json",bad[i]);
+        ck(!storage_import(d2,L"/tmp/quickphrase-storage-test/export.json",QP_IMPORT_REPLACE,&a,&u),"错误结构不能覆盖导入");
+        ck(tmpl_list_count(d2->templates)==2,"拒绝错误导入保留原模型");
+      }
+    }
+    {
+      const char binary_json[]="{}\0trailing";
+      FILE *f=fopen("/tmp/quickphrase-storage-test/data.json","wb");
+      size_t n=0; char *bytes; AppData *invalid;
+      ck(f!=NULL,"构造含 NUL 的错误数据文件");
+      if(f) { fwrite(binary_json,1,sizeof(binary_json)-1,f); fclose(f); }
+      invalid=storage_load(NULL); ck(invalid==NULL,"文本文件包含 NUL 时不能只解析前半段"); appdata_free(invalid);
+      bytes=storage_read_bytes(L"/tmp/quickphrase-storage-test/data.json",&n);
+      ck(bytes && n==sizeof(binary_json)-1 && !memcmp(bytes,binary_json,n),"拒绝 NUL 文件保留全部原始字节"); free(bytes);
+    }
+    ck(storage_write_text(L"/tmp/quickphrase-storage-test/data.json", "{broken") == 1,
+       "构造损坏数据文件");
+    { int cr=0; AppData *bad=storage_load(&cr);
+      ck(bad==NULL && cr==0, "损坏文件加载失败，不用示例数据冒充成功");
+      appdata_free(bad);
+      char *old=storage_read_text(L"/tmp/quickphrase-storage-test/data.json");
+      ck(old && strcmp(old,"{broken")==0,"加载失败保留原文件"); free(old); }
     appdata_free(d); appdata_free(d2);
     storage_set_data_dir(NULL);
     remove("/tmp/quickphrase-storage-test/data.json");

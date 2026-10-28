@@ -1,7 +1,7 @@
 /*
  * test_textview.c —— 预览排版内核自测（纯 C，本机 gcc 即可跑）
  */
-#include "../src/textview.h"
+#include "textview.h"
 
 #include <locale.h>
 #include <stdio.h>
@@ -173,7 +173,7 @@ static void test_hit_test(void)
     /* 行内像素 → 下标 */
     check(qp_tv_index_at(L"abcd", off, len, 0, -5, 10, 20) == 0, "x<0 归到行首");
     check(qp_tv_index_at(L"abcd", off, len, 0, 0, 10, 20) == 0, "x=0 是第一个字符");
-    check(qp_tv_index_at(L"abcd", off, len, 0, 25, 10, 20) == 2, "x=25 落在第三个字符");
+    check(qp_tv_index_at(L"abcd", off, len, 0, 25, 10, 20) == 3, "字符后半区落在字符之后");
     check(qp_tv_index_at(L"abcd", off, len, 0, 999, 10, 20) == 4, "x 超出行宽归到行尾");
 
     /* 下标 → 像素，与上面互为反函数 */
@@ -208,6 +208,60 @@ static void test_wide(void)
     check(qp_tv_char_wide(L' ') == 0, "空格是窄的");
 }
 
+static void test_wrap_regressions(void)
+{
+    int off[32], len[32], n, i;
+    const wchar_t *s = L"ab cdefgh";
+    n = qp_tv_wrap(s, 9, 10, 20, 40, off, len, 32);
+    check(n == 3 && off[1] == 3 && len[1] == 4 && off[2] == 7,
+          "空格回退后重新计算剩余字符，第二行不溢出");
+    for (i = 0; i < n; ++i)
+        check(len[i] * 10 <= 40, "每行宽度不超过可用宽度");
+    n = qp_tv_wrap(L"a\r\nb", 4, 10, 20, 100, off, len, 32);
+    check(n == 2 && len[0] == 1 && off[1] == 3 && len[1] == 1,
+          "CRLF 作为一个换行，不显示回车字符");
+    off[0] = 0; len[0] = 3;
+    check(qp_tv_index_at(L"abc", off, len, 0, 16, 10, 20) == 2,
+          "第二个字符后半区不会错误落回第一个字符之后");
+    {
+        const wchar_t pair[] = {0xD83D, 0xDE00, L'a', 0};
+        n = qp_tv_wrap(pair, 3, 10, 20, 20, off, len, 32);
+        check(n == 2 && len[0] == 2 && off[1] == 2,
+              "UTF-16 代理对不会拆成两行");
+        check(qp_tv_index_at(pair, off, len, 0, 16, 10, 20) == 2,
+              "命中不会落在 UTF-16 代理对中间");
+    }
+}
+
+static void test_raw_selection(void)
+{
+    const wchar_t *raw = L"a\t\t\t\tb";
+    wchar_t text[64], copied[64];
+    unsigned char kinds[64];
+    int map[64], marks[] = {1};
+    int n = qp_tv_build_mapped(raw, marks, 1, L"失败", text, 64, kinds, map);
+    check(qp_tv_capacity(raw, 1, L"失败") == 21, "容量包含全部 Tab 展开和提示以及结束符");
+    check(n == 20 && text[19] == L'b', "连续 Tab 不会截断后面的正文");
+    qp_tv_copy_raw(raw, map, n, 0, n, copied, 64);
+    check_str(copied, raw, "复制全选保留原始 Tab，不包含错误提示");
+    qp_tv_copy_raw(raw, map, n, 1, 3, copied, 64);
+    check_str(copied, L"", "只选择提示不复制伪造正文");
+    qp_tv_copy_raw(raw, map, n, 4, 5, copied, 64);
+    check_str(copied, L"\t", "选中 Tab 的一部分显示空间仍复制一个 Tab");
+    qp_tv_copy_raw(raw, map, n, n, 0, copied, 64);
+    check_str(copied, raw, "反向选区复制同一份原文");
+}
+
+static void test_measured_layout(void)
+{
+    int widths[] = {9, 22, 3};
+    int off[8], len[8];
+    int n = qp_tv_wrap_measured(L"abc", 3, widths, 31, off, len, 8);
+    check(n == 2 && len[0] == 2 && off[1] == 2, "折行使用实际字体宽度");
+    check(qp_tv_x_measured(L"abc", off, 0, 2, widths) == 31, "选区位置与实际绘制宽度一致");
+    check(qp_tv_index_measured(L"abc", off, len, 0, 22, widths) == 2, "鼠标命中使用同一份实际宽度");
+}
+
 int main(void)
 {
     setlocale(LC_ALL, "");
@@ -219,6 +273,9 @@ int main(void)
     test_hit_test();
     test_sel_range();
     test_wide();
+    test_wrap_regressions();
+    test_raw_selection();
+    test_measured_layout();
     printf("\n=========================\n通过 %d 项，失败 %d 项\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
 }
