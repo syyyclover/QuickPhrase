@@ -1,3 +1,4 @@
+from source_helpers import read_source, INCLUDE_FLAGS, CORE_SOURCES
 """Check Task 4's main-preview header geometry at supported DPI scales.
 
 This is a local layout harness, not a substitute for native Windows painting.
@@ -9,7 +10,7 @@ import re
 import sys
 
 repo = pathlib.Path(__file__).resolve().parents[1]
-source = (repo / "src/ui.c").read_text()
+source = read_source("ui.c")
 
 required = [
     r"g_hPreviewTextMode",

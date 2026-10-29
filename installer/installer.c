@@ -108,23 +108,33 @@ static int extract(int resid, const wchar_t *dest)
     HGLOBAL h;
     const void *p;
     DWORD size, written;
-    HANDLE f;
+    HANDLE f = INVALID_HANDLE_VALUE;
+    wchar_t temp[MAX_PATH];
+    int okay;
     if (!res) return 0;
     size = SizeofResource(NULL, res);
     h = LoadResource(NULL, res);
     if (!h || !size) return 0;
     p = LockResource(h);
     if (!p) return 0;
-    f = CreateFileW(dest, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
-                    FILE_ATTRIBUTE_NORMAL, NULL);
-    if (f == INVALID_HANDLE_VALUE) return 0;
-    if (!WriteFile(f, p, size, &written, NULL) || written != size) {
-        CloseHandle(f);
-        DeleteFileW(dest);
-        return 0;
+    /* Never truncate an installed binary before the complete replacement is
+       safely staged. CREATE_NEW also protects another writer's temporary. */
+    for (unsigned attempt = 0; attempt < 16; ++attempt) {
+        int n = _snwprintf(temp,MAX_PATH,L"%ls.qp-%lu-%u.tmp",dest,
+                         GetCurrentProcessId(),attempt);
+        temp[MAX_PATH-1]=L'\0';
+        if (n < 0 || n >= MAX_PATH) return 0;
+        f = CreateFileW(temp,GENERIC_WRITE,0,NULL,CREATE_NEW,FILE_ATTRIBUTE_NORMAL,NULL);
+        if (f != INVALID_HANDLE_VALUE) break;
+        if (GetLastError()!=ERROR_FILE_EXISTS && GetLastError()!=ERROR_ALREADY_EXISTS) return 0;
     }
-    CloseHandle(f);
-    return 1;
+    if (f == INVALID_HANDLE_VALUE) return 0;
+    okay = WriteFile(f,p,size,&written,NULL) && written==size;
+    if (okay && !FlushFileBuffers(f)) okay=0;
+    if (!CloseHandle(f)) okay=0;
+    if (okay && MoveFileExW(temp,dest,MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)) return 1;
+    DeleteFileW(temp);
+    return 0;
 }
 
 static int make_shortcut(const wchar_t *link, const wchar_t *target,
@@ -210,8 +220,8 @@ static int do_install(void)
 
     status(L"正在释放程序文件…", 30);
     if (!extract(IDR_APP_EXE, exe)) {
-        MessageBoxW(g_wnd, L"写入 QuickPhrase.exe 失败，目标目录可能没有写入权限，"
-                           L"或被安全软件拦截。", QP_PRODUCT, MB_OK | MB_ICONERROR);
+        MessageBoxW(g_wnd, L"无法写入 QuickPhrase.exe。请检查安装目录权限、可用空间"
+                           L"及文件占用后重试。", QP_PRODUCT, MB_OK | MB_ICONERROR);
         return 0;
     }
     status(L"正在释放卸载程序…", 45);
@@ -220,6 +230,8 @@ static int do_install(void)
                     MB_OK | MB_ICONERROR);
         return 0;
     }
+    SHChangeNotify(SHCNE_UPDATEITEM,SHCNF_PATHW|SHCNF_FLUSH,exe,NULL);
+    SHChangeNotify(SHCNE_UPDATEITEM,SHCNF_PATHW|SHCNF_FLUSH,uni,NULL);
 
     if (GetFileAttributesExW(exe, GetFileExInfoStandard, &fad))
         kb += (fad.nFileSizeLow + 1023) / 1024;
@@ -345,8 +357,8 @@ static void build_ui(void)
     g_hBrowse = mk(L"Button", L"浏览…", BS_PUSHBUTTON | WS_TABSTOP,
                    CW - 20 - 88, 126, 88, 24, IDC_BROWSE, NULL);
 
-    mk(L"Static", L"程序不到 1 MB，不写入系统目录；模板数据保存在 %APPDATA%\\QuickPhrase。",
-       SS_LEFT, 20, 156, CW - 40, 18, 0, NULL);
+    mk(L"Static", L"默认安装在当前用户目录；默认数据目录为 %APPDATA%\\QuickPhrase，可在应用内更改。",
+       SS_LEFT | SS_NOPREFIX, 20, 154, CW - 40, 34, 0, NULL);
 
     y = 190;
     g_chkDesktop = mk(L"Button", L"创建桌面快捷方式",
@@ -355,7 +367,7 @@ static void build_ui(void)
     g_chkStart = mk(L"Button", L"添加到开始菜单",
                     BS_AUTOCHECKBOX | WS_TABSTOP, 20, y + 26, CW - 40, 22,
                     IDC_CHK_STARTMNU, NULL);
-    g_chkAuto = mk(L"Button", L"开机自动启动（启动后驻留托盘，用 Alt+Q 唤出）",
+    g_chkAuto = mk(L"Button", L"开机自动启动（登录后驻留托盘，双击托盘图标打开）",
                    BS_AUTOCHECKBOX | WS_TABSTOP, 20, y + 52, CW - 40, 22,
                    IDC_CHK_AUTORUN, NULL);
     g_chkLaunch = mk(L"Button", L"安装完成后立即运行",
@@ -370,7 +382,7 @@ static void build_ui(void)
                               DPI(20), DPI(310), DPI(CW - 40), DPI(14),
                               g_wnd, (HMENU)(INT_PTR)IDC_PROGRESS, g_inst, NULL);
     SendMessageW(g_hProg, PBM_SETRANGE32, 0, 100);
-    g_hStatus = mk(L"Static", L"请确认安装位置与选项，然后点击“开始安装”。",
+    g_hStatus = mk(L"Static", L"请确认安装位置与选项，然后点击「开始安装」。",
                    SS_LEFT | SS_ENDELLIPSIS, 20, 332, CW - 40, 18, IDC_STATUS, NULL);
 
     g_hInstall = mk(L"Button", L"开始安装",

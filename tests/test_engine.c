@@ -2,7 +2,7 @@
  * test_engine.c —— 规则引擎自测（不依赖 Windows API，本机 gcc 即可运行）
  *   gcc -std=c11 -Wall -Wextra -o build/test_engine tests/test_engine.c src/engine.c && ./build/test_engine
  */
-#include "../src/engine.h"
+#include "engine.h"
 
 #include <locale.h>
 #include <stdio.h>
@@ -942,7 +942,7 @@ static void test_multi_condition(void)
     cond_rule_summary(r_any, t, txt, 512);
     check(qp_istr(txt, L" 或 ") != NULL, "任意满足的摘要用「或」连接");
     cond_rule_summary(cond_rule_at(host->condition_rules, 0), t, txt, 512);
-    check(qp_istr(txt, L"还没有设置条件") != NULL, "空规则摘要有提示");
+    check(qp_istr(txt, L"未配置条件") != NULL, "空规则摘要有提示");
     cond_term_summary(r_all->terms, t, txt, 512);
     check_str(txt, L"部件 包含「硬盘」", "单个条件项摘要");
 
@@ -1016,6 +1016,13 @@ static void test_time_format(void)
     /* 预置格式表 */
     check(qp_time_format_count() >= 8, "预置格式不少于 8 个");
     check_str(qp_time_format_at(0), L"yyyy-MM-dd HH:mm:ss", "第一个预置格式");
+    int compact_date_found=0;
+    for(int i=0;i<qp_time_format_count();++i)
+        if(!wcscmp(qp_time_format_at(i),L"yyyyMMdd"))compact_date_found=1;
+    check(compact_date_found,"预设包含 yyyyMMdd 紧凑日期");
+    struct tm compact_date={0};compact_date.tm_year=2025-1900;compact_date.tm_mon=1;compact_date.tm_mday=3;
+    qp_format_time(&compact_date,L"yyyyMMdd",buf,128);
+    check_str(buf,L"20250203","紧凑日期支持指定年月日");
     check_str(qp_time_format_at(-1), L"", "越界取预置格式得空串");
     check_str(qp_time_format_at(qp_time_format_count()), L"", "越界（上界）得空串");
 }
@@ -1699,6 +1706,16 @@ static void test_per_paragraph(void)
     eval_run(ctx);
     check_str(ctx->fields[id].value, L"AAA\nCCC", "未命中的段跳过，命中的合并");
 
+    pr->paragraph_inline = 1;
+    eval_run(ctx);
+    check_str(ctx->fields[id].value, L"AAACCC", "逐段连续填写允许空分隔符");
+    qp_strlcpy(pr->paragraph_separator, L"， ", QP_SEP_MAX);
+    eval_run(ctx);
+    check_str(ctx->fields[id].value, L"AAA， CCC", "逐段连续填写保留自定义分隔符空格");
+    pr->paragraph_inline = 0;
+    eval_run(ctx);
+    check_str(ctx->fields[id].value, L"AAA\nCCC", "切回换行忽略连续填写分隔符");
+
     /* 关闭逐段：整块只当一段处理，取第一处 */
     pr->per_paragraph = 0;
     eval_set_user_value(ctx, is, L"设备AAA异常\n设备BBB异常");
@@ -2236,7 +2253,7 @@ static void test_lint(void)
 
     /*
      * 「任意满足」的规则：一项死不等于规则死 —— 别的条件还能把它救活，
-     * 所以说明里只能说这一项白写；全都死了才敢说规则不会生效。
+     * 所以说明里只能说这一项永远不会成立；全都死了才敢说规则不会生效。
      */
     {
         Segment *some = seg_create(SEG_TEXT);   /* 一死一活 */
@@ -2281,12 +2298,103 @@ static void test_lint(void)
             if (is[i].seg_index == 9)  at_some = i;
             if (is[i].seg_index == 10) at_all  = i;
         }
-        check(at_some >= 0 && wcsstr(is[at_some].text, L"白写") != NULL &&
+        check(at_some >= 0 && wcsstr(is[at_some].text, L"永远不会成立") != NULL &&
               wcsstr(is[at_some].text, L"不会生效") == NULL,
-              "任意满足且还有活条件时，只说这一项白写");
+              "任意满足且还有活条件时，只说这一项永远不会成立");
         check(at_all >= 0 && wcsstr(is[at_all].text, L"每个条件都永远") != NULL,
               "任意满足且条件全死时，才说这条规则不会生效");
     }
+
+    free(is);
+    tmpl_free(t);
+}
+
+/* ---------------------------------------------------------------- */
+/* 解析规则挂在非文本变量上：引擎不跑它，编辑器也不显示「解析规则」那一栏，
+   于是它既不会生效、用户也看不见、更删不掉。体检必须说一句。
+   真实来路：先把变量配成文本、挂好规则，再改成单选/多选/时间。 */
+static void test_lint_parse_notext(void)
+{
+    Template *t = tmpl_create(L"非文本上的解析规则");
+    Segment *sel   = seg_create(SEG_SELECT);
+    Segment *multi = seg_create(SEG_MULTI_SELECT);
+    Segment *when  = seg_create(SEG_DATETIME);
+    Segment *txt   = seg_create(SEG_TEXT);      /* 正常：文本上的不报 */
+    Segment *dst   = seg_create(SEG_TEXT);
+    LintIssue *is = (LintIssue *)calloc(QP_LINT_MAX, sizeof(LintIssue));
+    ParseRule *pr;
+    int n;
+
+    printf("\n== 非文本变量上的解析规则 ==\n");
+    if (!t || !sel || !multi || !when || !txt || !dst || !is) {
+        check(0, "创建测试模板");
+        free(is); tmpl_free(t); return;
+    }
+
+    qp_strlcpy(sel->label, L"类别", QP_LABEL_MAX);
+    seg_add_option(sel, L"硬件");
+    qp_strlcpy(multi->label, L"标签", QP_LABEL_MAX);
+    seg_add_option(multi, L"甲");
+    qp_strlcpy(when->label, L"时间", QP_LABEL_MAX);
+    qp_strlcpy(txt->label, L"来源", QP_LABEL_MAX);
+    qp_strlcpy(dst->label, L"目标", QP_LABEL_MAX);
+
+    /* 三个非文本变量上各挂一条（模拟「配好再改类型」留下的残骸） */
+    pr = parse_rule_create();
+    pr->type = PARSE_SPLIT;
+    qp_strlcpy(pr->delimiter, L"-", QP_SEP_MAX);
+    pr->segment_index = 1;
+    qp_strlcpy(pr->target_segment_id, dst->id, QP_ID_MAX);
+    parse_rule_append(&sel->parse_rules, pr);
+
+    pr = parse_rule_create();
+    qp_strlcpy(pr->target_segment_id, dst->id, QP_ID_MAX);
+    parse_rule_append(&multi->parse_rules, pr);
+
+    pr = parse_rule_create();
+    qp_strlcpy(pr->target_segment_id, dst->id, QP_ID_MAX);
+    parse_rule_append(&when->parse_rules, pr);
+
+    /* 文本变量上同样的一条：正常，不该被报 */
+    pr = parse_rule_create();
+    pr->type = PARSE_CONTAINS;
+    qp_strlcpy(pr->keyword, L"停机", QP_KEYWORD_MAX);
+    qp_strlcpy(pr->target_segment_id, dst->id, QP_ID_MAX);
+    parse_rule_append(&txt->parse_rules, pr);
+
+    seg_list_append(&t->segments, sel);
+    seg_list_append(&t->segments, multi);
+    seg_list_append(&t->segments, when);
+    seg_list_append(&t->segments, txt);
+    seg_list_append(&t->segments, dst);
+
+    n = tmpl_lint(t, is, QP_LINT_MAX);
+    check(lint_count(is, n, LINT_PARSE_NONTEXT) == 3,
+          "三个非文本变量上的解析规则各报一条");
+    check(lint_count(is, n, LINT_PARSE_DANGLING) == 0,
+          "文本变量上那条不报（只报非文本的）");
+
+    /* 说明里要点出第几段、现在是什么类型、为什么不会运行 */
+    {
+        int i, at = -1;
+        for (i = 0; i < n; ++i)
+            if (is[i].kind == LINT_PARSE_NONTEXT && is[i].seg_index == 0) at = i;
+        check(at >= 0, "报出了第 1 段那条");
+        if (at >= 0) {
+            check(wcsstr(is[at].text, L"单选") != NULL, "说明里写清当前类型是「单选」");
+            check(wcsstr(is[at].text, L"不会运行") != NULL, "说明里点明它不会运行");
+        }
+    }
+
+    /* 已经说清「不会运行」了，就别再叠一句「正则没填」——一条根因就够 */
+    pr = parse_rule_create();
+    pr->type = PARSE_REGEX;                     /* 故意不填模式 */
+    qp_strlcpy(pr->target_segment_id, dst->id, QP_ID_MAX);
+    parse_rule_append(&sel->parse_rules, pr);
+    n = tmpl_lint(t, is, QP_LINT_MAX);
+    check(lint_count(is, n, LINT_PARSE_NONTEXT) == 4, "第 1 段有两条 → 报两条");
+    check(lint_count(is, n, LINT_PARSE_REGEX) == 0,
+          "非文本上的正则规则不再重复报「没填模式」");
 
     free(is);
     tmpl_free(t);
@@ -2322,7 +2430,7 @@ static void test_table_lint(void)
     qp_strlcpy(t->table_output_format, L"{丙}\\t{乙}", QP_OUTPUT_MAX);
     n = tmpl_lint(t, is, QP_LINT_MAX);
     check(n == 1 && wcsstr(is[0].text, L"丙") != NULL &&
-          wcsstr(is[0].text, L"找不到") != NULL,
+          wcsstr(is[0].text, L"没有对应") != NULL,
           "表格格式引用未知变量会被体检报告");
 
     qp_strlcpy(t->table_output_format, L"{甲}\\t{乙}", QP_OUTPUT_MAX);
@@ -2575,6 +2683,7 @@ int main(void)
     test_output_modes();
     test_batch_render();
     test_lint();
+    test_lint_parse_notext();
     test_table_lint();
     test_parse_regex();
     test_render_marks();

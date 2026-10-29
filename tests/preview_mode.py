@@ -1,3 +1,4 @@
+from source_helpers import read_source, INCLUDE_FLAGS, CORE_SOURCES
 """Exercise Task 4's pure main-preview mode decision helper.
 
 The application UI is Win32-only, so this local harness extracts the helper from
@@ -12,7 +13,7 @@ import sys
 import tempfile
 
 repo = pathlib.Path(__file__).resolve().parents[1]
-source = (repo / "src/ui.c").read_text()
+source = read_source("ui.c")
 match = re.search(
     r"static\s+OutputMode\s+ui_effective_output_mode\s*\([^;]+?\)\s*\n\{",
     source,
@@ -65,8 +66,7 @@ int main(void) {
 with tempfile.TemporaryDirectory(prefix="qp-task4-preview-") as tmp:
     exe = pathlib.Path(tmp) / "preview-mode"
     result = subprocess.run(
-        ["cc", "-std=gnu11", "-O0", "-Wall", "-Wextra", "-I",
-         str(repo / "src"), "-x", "c", "-", "-o", str(exe)],
+        ["cc", "-std=gnu11", "-O0", "-Wall", "-Wextra", *INCLUDE_FLAGS, "-x", "c", "-", "-o", str(exe)],
         input=driver, text=True,
     )
     if result.returncode:
@@ -88,7 +88,7 @@ if not preview:
     print("RED: missing main preview control creation")
     sys.exit(1)
 
-preview_src = (repo / "src/preview.c").read_text()
+preview_src = read_source("preview.c")
 factory = re.search(
     r"HWND\s+qp_preview_create\s*\([^)]*\)\s*\n\{.*?\n\}\n",
     preview_src, re.S,

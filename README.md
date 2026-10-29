@@ -4,17 +4,25 @@
 按 `Ctrl+Enter` 复制走。常驻系统托盘，全局热键（默认 `Alt+Q`）随时唤出。
 
 纯 **C11 + Win32 API + cJSON** 实现，无 Electron / 无浏览器内核 / 无运行时依赖，
-静态链接单文件 exe，几百 KB。解析规则支持四种取法（按分隔符取段 / 包含关键词 /
-取两标记之间 / 正则表达式），正则引擎是自带的，不引入任何第三方库。
+静态链接单文件 exe，几百 KB。解析规则支持五种取法（按分隔符取段 / 包含关键词 /
+取两标记之间 / 正则表达式 / 查表匹配），正则引擎是自带的，不引入任何第三方库；
+查表匹配可以直接读入 CSV / TSV 名单，像表格软件的 VLOOKUP 一样按键取行、按列填值。
 
 ---
 
 ## 1. 交付物
 
+本轮已停止继续优化，当前交接状态见[最终交接记录](docs/3.5.0-final-handoff-20261028.md)。编辑器外框缩放仍不及主界面流畅，此项未完全解决。
+
 | 文件 | 说明 |
 | --- | --- |
-| `dist/QuickPhrase-3.3.0-setup.exe` | **安装包**（自带界面向导，内嵌主程序与卸载器） |
-| `dist/QuickPhrase.exe` | 免安装绿色版主程序（可直接双击运行） |
+| `dist/editor-combo-layout-20261028/QuickPhrase-3.5.0-setup.exe` | 当前验证过的 **3.5.0 安装包**（内嵌主程序与卸载器） |
+| `dist/editor-combo-layout-20261028/QuickPhrase.exe` | 当前验证过的免安装绿色版主程序 |
+
+2026-10-28 已将旧版发布产物集中归档，当前交付以表中目录为准，校验值见该目录的 `SHA256SUMS`。旧文件因自动审批阻止删除而保留于本地 `.local-notes/`，不上传 GitHub。
+三个问题的原因、修正及目录说明见 [修复总结与目录整理](docs/3.5.0-cleanup-20261028.md)，
+编辑器拉伸卡顿补修和验证限制见 [编辑器性能修正记录](docs/3.5.0-editor-combo-layout-20261028.md)。
+以后执行默认 `make setup` 仍按 Makefile 约定在 `dist/` 根目录生成新安装包；构建输出不自动代表已经完成视觉验收。
 
 安装包只写 `HKEY_CURRENT_USER` 与用户目录，**不需要管理员权限、不弹 UAC**，
 默认安装到 `%LOCALAPPDATA%\Programs\QuickPhrase`。
@@ -28,7 +36,7 @@ QuickPhrase.exe            启动并显示主界面
 QuickPhrase.exe --show     启动并显示主界面（快捷方式用的就是这个）
 QuickPhrase.exe --tray     强制静默驻留托盘（开机启动项用的就是这个）
 
-QuickPhrase-3.3.0-setup.exe /S    静默安装到默认位置
+QuickPhrase-3.5.0-setup.exe /S    静默安装到默认位置
 uninstall.exe /S [/PURGE]         静默卸载（/PURGE 连数据一起删）
 ```
 
@@ -39,7 +47,7 @@ uninstall.exe /S [/PURGE]         静默卸载（/PURGE 连数据一起删）
 | `%APPDATA%\QuickPhrase\data.json` | 全部分组与模板（UTF-8，可直接编辑、可版本管理） |
 | `%APPDATA%\QuickPhrase\settings.json` | 热键、主题、窗口位置、多选分隔符等 |
 
-写入采用「先写 `.tmp` 再 `MoveFileEx` 覆盖」的原子替换，中途断电不会留下半个文件。
+写入采用「先写 `.tmp`、刷新到磁盘，再 `MoveFileEx` 覆盖」的原子替换；失败会提示并保留原文件。
 主界面「文件 → 导入 / 导出」可把所有模板打包成一个 JSON 交换，导入支持**合并**（同 id 覆盖、新 id 追加）
 与**整体替换**两种模式。
 
@@ -58,6 +66,8 @@ uninstall.exe /S [/PURGE]         静默卸载（/PURGE 连数据一起删）
 ## 3. 使用速览
 
 - 左侧是模板树，支持分组（文件夹）、拖拽模板进分组、搜索框实时过滤（模板名 / 片段标签 / 固定内容都会被搜）。
+- 菜单「数据表 → 管理数据表（名单 / 联系表）」可以导入 CSV / TSV 名单：只登记名称与文件路径（编码 / 分隔符 /
+  有无表头可调），文件内容换了不必重新导入；「查表匹配」解析规则就按名称引用这些表。
 - 右侧是生成区：模板里定义的每个片段会变成一行控件——
   文本片段 → 输入框（可勾「多行文本」给大文本框），单选片段 → 下拉框，
   多选片段 → 勾选弹层（结果按分隔符拼接），时间片段 → 输入框 + 「现在」按钮
@@ -73,7 +83,7 @@ uninstall.exe /S [/PURGE]         静默卸载（/PURGE 连数据一起删）
   不是去认正文里的字：你的数据里本来写着「失败」二字，也不会被标色；哪几处该提示，
   由引擎算出来的「空值位置」决定。
   **表格预览是一张真正的表格**：按列对齐、带列名表头、浅网格与隔行底色，横向纵向都能滚；
-  某一格没取到值（解析规则没命中）时，那里会用红字标出「未匹配」。
+  某一格因解析规则未命中而缺值时，那里会用红字标出「未匹配」；合法空白不标错。
   预览区和左侧模板树之间那两条分隔条都可以拖（预览高度会记住），双击恢复默认。
 - **模板编辑器里的「默认值预览」是同一个控件、同一套样式**：同样能切「文本预览 / 表格预览」，
   表格一样对齐带表头，文本一样能拖选、一样把没匹配上的地方标出来。改一条规则立刻能看到效果，
@@ -104,15 +114,21 @@ uninstall.exe /S [/PURGE]         静默卸载（/PURGE 连数据一起删）
   （`*?` `+?` `{m,n}?`）。「捕获组」填 `0` 取整个匹配，填 `1`、`2`… 取对应括号里的那部分：
   上面那条配捕获组 `1`，拿到的是编号本身而不是「设备编号：」。匹配同样**大小写不敏感**，
   `\w` 认得中文、`\s` 连全角空格也算。
-- 任一种解析规则都可勾「逐段处理」：源变量里是多段话（换行分隔）时，对每一段各抽取一次，
-  空白段会跳过，命中的结果再按行合并——一个变量里粘进好几段告警，就能逐段生成、结果分行。
+- *查表匹配*（第五种类型）：先点「管理数据表…」导入一份 CSV / TSV（只登记文件引用，
+  表内容永远以磁盘文件为准，更新名单覆盖同一文件即可），再让规则拿一个值当键去某一列里
+  找到那一行，把该行的若干列填进模板变量。键可以取本变量的值、另一个变量的值或一个固定值；
+  多条命中时可以取第一条 / 最后一条 / 全部按分隔符拼接（可去重）。键按「去首尾空白 +
+  大小写不敏感」比对，纯数字的键再按数值比一次。
+- 任一种解析规则都可勾「逐段处理」：源变量里是多段话（换行分隔）时，对每一段各抽取一次
+  （查表匹配则是每段各查一次），空白段会跳过，命中的结果再按行合并——一个变量里粘进
+  好几段告警，就能逐段生成、结果分行。
 - 来源为空、只有空白，或从有内容改为空时，解析规则一律不命中；旧的派生值会立即清掉，
   目标回到手填值或显式默认值，都没有时就是空，不会保留上一次命中的结果。正则取到空串
   也按未命中处理；模式写坏了（括号不配对之类）既不命中也不会崩，保存时体检会指出问题位置。
 
 #### 正则引擎的验证情况
 
-正则引擎是自带的（`src/regex.c`，纯 C、无第三方依赖），并做过**差分验证**：`tests/regex_diff.py`
+正则引擎是自带的（`src/core/regex.c`，纯 C、无第三方依赖），并做过**差分验证**：`tests/regex_diff.py`
 随机生成大批 (模式, 文本)，把本引擎的结果与 Python 的 `re`（`IGNORECASE` + `search`）逐字节比对。
 
 - **「实际会写的那类模式」100% 一致**（4000 条，硬门槛）。生成时会排除「把量词套在可空分组上」、
@@ -205,12 +221,18 @@ uninstall.exe /S [/PURGE]         静默卸载（/PURGE 连数据一起删）
 - 规则没有任何条件项，或结果值是空的；
 - 开了批量却没选源变量，或选的源变量已被删除 / 不是文本变量；
 - 固定内容或表格格式里有认不出的占位符；
-- 开了表格输出但格式为空、变量名不唯一，或格式没有 `\t` / 实际 Tab 分列符。
+- 开了表格输出但格式为空、变量名不唯一，或格式没有 `\t` / 实际 Tab 分列符；
+- 查表规则没配齐：没选数据表、键来源变量没选或已删除、键来源选「固定值」但值是空的；
+- 查表输出配不出来：一个输出列都没配，或配了输出列却一个目标变量都没选、取值列没选；
+- 查表引用的表 / 列不存在，或键列不是唯一键（提醒当前命中策略选得对不对）。
 
 判断用的是引擎那一份代码，所以体检和实际生成不会有两套说法；穷举不了的（能手打的文本、
-多选的组合、时间串、被别的规则接管的变量）一概不报——宁可漏报，不冤枉一条好规则。
+多选的组合、时间串、被别的规则接管的变量，以及**由查表匹配填值的变量**）一概不报——
+宁可漏报，不冤枉一条好规则。
 
 ## 4. 从源码构建
+
+Windows 使用 MSYS2 UCRT64 的原生全量构建命令、运行文件路径核对及连续切换验收见 [Windows 构建说明](docs/windows-build.md)。
 
 需要 MinGW-w64 交叉编译器（Linux 上 `dnf install mingw64-gcc` 或 `apt install gcc-mingw-w64-x86-64`）
 与 Python 3 + Pillow（只用于生成 `.ico`，`res/*.ico` 已随源码提供）。
@@ -223,76 +245,43 @@ make size       # 看产物体积
 make clean
 ```
 
-手工编译（等价于 `make app`）：
-
-```bash
-x86_64-w64-mingw32-windres -c 65001 -I. -Isrc resource.rc -O coff -o build/resource.res
-x86_64-w64-mingw32-gcc -std=gnu11 -O2 -municode -mwindows -s -static -Isrc \
-    src/main.c src/ui.c src/ui_dialogs.c src/preview.c src/textview.c src/engine.c \
-    src/storage.c src/cJSON.c \
-    src/regex.c src/launch.c \
-    build/resource.res -o build/QuickPhrase.exe \
-    -luser32 -lgdi32 -lcomctl32 -lshell32 -ladvapi32 -lcomdlg32 -luxtheme \
-    -lole32 -loleaut32 -luuid -ldwmapi
-```
+源码和头文件清单由 Makefile 管理；可用 `make -n app` 查看完整交叉编译命令。开发规范见 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)。
 
 ## 5. 源码结构
 
 ```
-src/engine.c   .h    数据模型 + 规则引擎，纯 C，不含任何窗口 API → 可独立单测
-src/storage.c  .h    cJSON 读写 data.json / settings.json、UTF-8↔UTF-16、导入导出
-src/main.c           WinMain、单实例、托盘、全局热键、主题、开机启动
-src/ui.c             主窗口：模板树、动态字段区、实时预览、复制、深色模式
-src/ui_dialogs.c     模板编辑器、解析/条件规则对话框、设置、关于、输入框
-src/preview.c  .h    口径预览控件（文本 / 表格两种呈现，自绘；主界面与编辑器共用）
-src/textview.c .h    预览用纯文本排版内核（提示插入 / 折行 / 命中，纯 C → 可独立单测）
-src/regex.c    .h    内置正则引擎（回溯虚拟机，纯 C，无第三方依赖）→ 可独立单测
-src/cJSON.c    .h    第三方 JSON 库（MIT）
-installer/           安装程序与卸载程序（同样是原生 Win32 C）
-tests/               排版、正则、引擎、存储与启动策略的自检 + 正则差分验证
+src/core/       纯 C 核心：strings / model / eval / render / summary / lint / seed
+                以及 table / regex / unicode / textview / storage
+src/ui/         main_*：主题与工具、字段与滚动、模板树、会话、多选弹层、布局、窗口
+                dialog_*：公共骨架、规则、模板编辑、设置、数据表、查表
+                preview：文本/表格自绘预览
+src/platform/   main：入口、托盘、热键、进程和应用状态
+                launch：启动策略；app：共享应用声明；version：统一版本
+third_party/    cjson：第三方 JSON 库及原始许可
+installer/      Win32 安装器与卸载器
+res/icons/      image 模型生成的透明 PNG 母图与生成提示词
+tests/          核心回归、正则差分、布局/通知契约检查、Win32 集成检查
+docs/           开发规范、实施记录、3.5.0 修复与验证报告
+tools/          图标打包与不会覆盖旧快照的快照工具
 ```
 
-界面全部用原生控件（Edit / ComboBox / TreeView / ListView / Button）手工布局，
-按 DPI 缩放；深色模式走 uxtheme 的 `DarkMode_Explorer` 主题与 `DwmSetWindowAttribute`，
-在不支持的旧系统上自动退回浅色，不会报错。
+模块按职责分别编译，公共引擎接口仍在 `engine.h`。核心算法不依赖窗口控件，存储和数据表的平台文件访问用条件编译隔离。UI 内部共享接口不作为公共 API。
 
-## 6. 仓库目录
+## 6. 验证与开发资料
 
-```
-QuickPhrase/
-├── src/            源码（见上一节的清单）
-├── installer/      安装程序 / 卸载程序
-├── res/            图标与程序清单
-├── tests/          本机自测（引擎、存储、正则、排版、启动策略）+ 正则差分验证
-├── tools/          mkicon.py（生成 .ico）、snapshot.sh（打版本快照）
-├── examples/       验收用的样例输入（示例告警、截图；本机自备，不进版本库）
-├── README.md       本文件
-├── QuickPhrase.md  开发需求与设计说明（本地保留，不进版本库）
-├── Makefile        构建脚本
-├── .gitattributes  行尾统一 LF（见下）
-└── build/ dist/    构建中间件与产物（make clean 可清，不进版本库）
-         snapshots/ 版本快照（tools/snapshot.sh 生成，故意放在 build/ 之外）
+```sh
+make -j4 test       # 本机 C/Python 回归与差分检查
+make -j4 sanitize   # clang ASan/UBSan，含泄漏检查
+make win32-test     # 隔离 Wine/Xvfb 的真实窗口检查
+make icons         # 从已入库母图打包 ICO，无网络生成步骤
 ```
 
-### 关于行尾
+Windows 可直接运行 `build/test_win32.exe`，检查真实窗口、布局、模态对话框和预览复制。模拟 API 的布局测试不能代替原生 Windows 绘制验收；各项结果与未验证项见 [3.5.0 报告](docs/3.5.0-release.md)。
 
-仓库同时在 Windows 与 Linux 上开发（Windows 目录是 VMware 共享目录，Linux 侧直接
-`make` 编译）。Windows 版 git 默认 `core.autocrlf=true`，检出时会把文本写成 CRLF，
-而 Linux 侧的 `autocrlf` 是关的 —— 两边行尾不一致时，`git diff` 会把整个文件报成
-改动（实测 14756 行全变），等于看不见真正的修改。所以 `.gitattributes` 里显式钉住
-`* text=auto eol=lf`：文本文件在版本库与工作区都统一 LF，两个平台看到的是同一份差异。
+真实业务模板与本机样例不随项目交付，夹具缺失时两组验收会明确报告跳过。仓库内另有合成模板覆盖规则、查表、批量、旧 JSON 和异常输入。首次运行仍只内置两个通用测试模板。
 
-### 关于验收夹具
-
-`data.json`、`QuickPhrase-模板.json`、`examples/示例完整.txt` 这些**真实业务模板与
-样例**不进版本库（按 `.gitignore` 忽略，也从版本库中移除了）：它们只在本机存在，
-供 `tests/` 里的验收用例读取。夹具不在时，那两组用例会明确打印「跳过」并计数，
-而不是报一堆失败，也不会假装通过。
-
-安装包与软件本体同样**只内置两个测试模板**（`软件版本发布说明口径` 与
-`复杂示例 · 违规处置通报`），应用首次运行时在 `%APPDATA%\QuickPhrase` 生成，
-不含任何业务模板。
+文本文件使用 UTF-8 与 LF 行尾，由 `.gitattributes` 约束。构建产物在 `build/` 和 `dist/`，不会提交；快照在独立的 `snapshots/` 下，每次生成唯一目录。`QuickPhrase.md` 与已有本地修复说明保留。
 
 ## 7. 许可
 
-本项目代码以 MIT 许可发布；`src/cJSON.*` 版权归 Dave Gamble 及 cJSON 贡献者所有（MIT）。
+本项目代码以 MIT 许可发布；`third_party/cjson/cJSON.*` 版权归 Dave Gamble 及 cJSON 贡献者所有（MIT）。

@@ -8,7 +8,7 @@
  *
  * 与 tests/regex_diff.py 配对使用：那边用 Python 的 re 算出期望值再逐行比对。
  */
-#include "../src/regex.h"
+#include "regex.h"
 
 #include <stdio.h>
 #include <stdlib.h>

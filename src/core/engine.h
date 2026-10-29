@@ -1,0 +1,583 @@
+/*
+ * engine.h —— 口径生成器 数据模型 + 规则引擎
+ *
+ * 本文件与本层实现 (engine.c) 不依赖任何 Windows API，仅使用 C11 标准库，
+ * 因此可以在任意平台上独立编译并单元测试（见 tests/test_engine.c）。
+ *
+ * 字符串统一使用 wchar_t（Windows 下为 UTF-16），仅在 storage.c 读写文件时
+ * 与 UTF-8 互转。
+ */
+#ifndef QP_ENGINE_H
+#define QP_ENGINE_H
+
+#include <stddef.h>
+#include <wchar.h>
+#include <time.h>
+
+/* ------------------------------------------------------------------ */
+/* 容量常量                                                            */
+/* ------------------------------------------------------------------ */
+#define QP_ID_MAX        64
+#define QP_NAME_MAX      256
+#define QP_LABEL_MAX     128
+#define QP_CONTENT_MAX   1024
+#define QP_PLACEHOLD_MAX 128
+#define QP_SEP_MAX       16
+#define QP_KEYWORD_MAX   128
+#define QP_PATTERN_MAX   512          /* 正则表达式模式串              */
+#define QP_MATCH_MAX     256
+#define QP_VALUE_MAX     2048         /* 变量取值：要装得下多行大段文字 */
+#define QP_RESULT_MAX    2048
+#define QP_TIME_MAX      32
+#define QP_FORMAT_MAX    64           /* 时间格式串                     */
+#define QP_OUTPUT_MAX    32768
+#define QP_PATH_MAX      520          /* 文件路径缓冲（engine 层不依赖 windows.h） */
+
+/* 规则引擎迭代上限：防止规则互相触发导致死循环 */
+#define QP_EVAL_MAX_PASS 8
+/* 引用链的最大深度：A 引用 B、B 引用 C…… 同时也是成环检测的上限 */
+#define QP_REF_MAX_DEPTH 16
+/* 单个片段的内容里最多记几处「占位符展开成空」（预览标红用） */
+#define QP_EMPTY_MARK_MAX 8
+
+/* ------------------------------------------------------------------ */
+/* 枚举                                                                */
+/* ------------------------------------------------------------------ */
+typedef enum {
+    SEG_STATIC = 0,       /* 固定片段  */
+    SEG_TEXT = 1,         /* 文本输入  */
+    SEG_SELECT = 2,       /* 下拉单选  */
+    SEG_MULTI_SELECT = 3, /* 下拉多选  */
+    SEG_DATETIME = 4      /* 时间日期  */
+} SegmentType;
+
+/* 引用取法：整体 / 按分隔符取第 N 段 / 按字截取 */
+typedef enum {
+    REF_WHOLE = 0,
+    REF_SPLIT = 1,
+    REF_SUBSTR = 2
+} RefMode;
+
+typedef enum {
+    PARSE_SPLIT = 0,      /* 按分隔符切割取第 N 段 */
+    PARSE_CONTAINS = 1,   /* 包含关键词            */
+    PARSE_BETWEEN = 2,    /* 取「前标记」与「后标记」之间的内容 */
+    PARSE_REGEX = 3,      /* 正则表达式匹配（取整体或第 N 个捕获组） */
+    PARSE_LOOKUP = 4      /* 查表匹配：拿键去数据表里查，取若干列填进若干变量 */
+} ParseRuleType;
+
+/* 查表时「键从哪来」 */
+typedef enum {
+    LOOKUP_KEY_HOST = 0,  /* 规则所挂变量的值（默认，等价 vlookup 的第一个参数） */
+    LOOKUP_KEY_VAR  = 1,  /* 另一个变量的值 */
+    LOOKUP_KEY_FIX  = 2   /* 一个固定值（常量当键） */
+} LookupKeyMode;
+
+/* 键可能不唯一，命中策略决定怎么取值 */
+typedef enum {
+    LOOKUP_FIRST = 0,     /* 取第一条（vlookup 语义） */
+    LOOKUP_LAST  = 1,     /* 取最后一条（每周往表尾追加的人常用） */
+    LOOKUP_ALL   = 2      /* 全部取出，按分隔符拼接（可选去重） */
+} LookupHitMode;
+
+/* 一组输出：表里的哪一列 → 填进哪个变量 */
+typedef struct LookupOut {
+    wchar_t col[QP_LABEL_MAX];            /* 列名（有表头时按名字找；空 = 按下标） */
+    int     col_index;                    /* 从 0 起（没表头时按第几列） */
+    wchar_t target_segment_id[QP_ID_MAX]; /* 填进哪个变量 */
+    struct LookupOut *next;
+} LookupOut;
+
+typedef enum {
+    OP_CONTAINS = 0,
+    OP_EQUALS = 1,
+    OP_STARTS_WITH = 2,
+    OP_IN = 3,
+    OP_ENDS_WITH = 4,
+    OP_EMPTY = 5          /* 为空；配合 negate 表达「不为空」 */
+} CondOperator;
+
+/* 条件项之间的组合方式 */
+typedef enum {
+    COND_JOIN_ALL = 0,    /* 全部满足（且） */
+    COND_JOIN_ANY = 1     /* 任意满足（或） */
+} CondJoin;
+
+typedef enum {
+    OUTPUT_TEXT = 0,
+    OUTPUT_TABLE = 1
+} OutputMode;
+
+/* ------------------------------------------------------------------ */
+/* 解析规则：挂在 text 变量上，从输入值提取信息去填充「目标变量」        */
+/* ------------------------------------------------------------------ */
+typedef struct ParseRule {
+    wchar_t id[QP_ID_MAX];
+    ParseRuleType type;
+    wchar_t delimiter[QP_SEP_MAX];        /* split: 分隔符            */
+    int     segment_index;                /* split: 第 N 段, 从 1 开始 */
+    wchar_t keyword[QP_KEYWORD_MAX];      /* split/contains: 命中关键词（空=任意命中）；
+                                             between: 前标记（空=从头）           */
+    wchar_t marker_after[QP_KEYWORD_MAX]; /* between: 后标记（空=到末尾）         */
+    wchar_t pattern[QP_PATTERN_MAX];      /* regex: 正则表达式（大小写不敏感搜索）*/
+    int     capture_group;                /* regex: 取第几个捕获组；0 = 整体匹配  */
+    int     per_paragraph;                /* 1 = 源按换行拆成多段，逐段抽取、结果按行合并 */
+    int     paragraph_inline;             /* 1 = 命中的段连续填写，使用 paragraph_separator */
+    wchar_t paragraph_separator[QP_SEP_MAX]; /* 连续填写分隔符；空串表示直接连接 */
+    wchar_t target_segment_id[QP_ID_MAX]; /* 目标变量片段 id          */
+    wchar_t fill_value[QP_VALUE_MAX];     /* 填充值（空=用提取到的值） */
+    /* ---- 查表匹配（type == PARSE_LOOKUP）----
+       一次查表可以填多个变量：键来自「本变量 / 另一个变量 / 固定值」，
+       命中若干行后按策略取值，再逐列写进各自的目标变量。 */
+    int     lk_key_mode;                  /* LookupKeyMode            */
+    wchar_t lk_key_var_id[QP_ID_MAX];     /* LOOKUP_KEY_VAR：来源变量 id */
+    wchar_t lk_key_value[QP_MATCH_MAX];   /* LOOKUP_KEY_FIX：固定键    */
+    wchar_t lk_table_id[QP_ID_MAX];       /* 数据表 id（空 = 没选）    */
+    wchar_t lk_key_col[QP_LABEL_MAX];     /* 键列名（有表头时按名找；空 = 用下标） */
+    int     lk_key_col_index;             /* 键列下标，从 0 起         */
+    int     lk_hit;                       /* LookupHitMode：第一条/最后一条/全部 */
+    wchar_t lk_sep[QP_SEP_MAX];           /* 全部模式下的拼接分隔符，默认「、」 */
+    int     lk_unique;                    /* 全部模式：重复值只留一份  */
+    LookupOut *lk_outs;                   /* 输出对列表（取值列 → 目标变量） */
+    struct ParseRule *next;
+} ParseRule;
+
+/* ------------------------------------------------------------------ */
+/* 条件规则：挂在任意片段上，控制该片段最终输出内容                     */
+/*                                                                    */
+/* 一条规则 = 若干「条件项」 + 一个结果值。条件项之间按 join 组合        */
+/* （全部满足 / 任意满足），每个条件项还可以单独取反（negate）。         */
+/* 只有一个未取反的条件项时，语义与老版本完全一致。                     */
+/* ------------------------------------------------------------------ */
+typedef struct CondTerm {
+    wchar_t trigger_segment_id[QP_ID_MAX];
+    CondOperator op;
+    int     negate;                       /* 1 = 不满足该条件时才算成立 */
+    wchar_t match_value[QP_MATCH_MAX];    /* 单值 / OP_IN 时为原始文本 */
+    wchar_t **match_values;               /* OP_IN 拆分后的列表        */
+    int     match_value_count;
+    struct CondTerm *next;
+} CondTerm;
+
+typedef struct ConditionRule {
+    wchar_t id[QP_ID_MAX];
+    CondJoin join;
+    CondTerm *terms;
+    wchar_t result_value[QP_RESULT_MAX];
+    struct ConditionRule *next;
+} ConditionRule;
+
+/* ------------------------------------------------------------------ */
+/* 片段                                                                */
+/* ------------------------------------------------------------------ */
+typedef struct Segment {
+    wchar_t id[QP_ID_MAX];
+    SegmentType type;
+    wchar_t label[QP_LABEL_MAX];          /* 变量名（static 为空）     */
+    wchar_t content[QP_CONTENT_MAX];      /* static 的固定内容         */
+    wchar_t placeholder[QP_PLACEHOLD_MAX];
+    wchar_t **options;                    /* select / multi-select 选项 */
+    int     option_count;
+    int     custom_option;               /* 0 = 普通选项；否则为自主补充项的 1 起索引 */
+    wchar_t separator[QP_SEP_MAX];        /* multi-select 拼接分隔符   */
+    wchar_t default_value[QP_VALUE_MAX];
+    int     hidden;                       /* 1 = 填写界面不显示，只靠
+                                             变量匹配/默认值填充      */
+    int     no_output;                    /* 1 = 参与匹配/引用/占位符，但不进入
+                                             最终输出。拼表格行时，源句子与只为
+                                             拼行服务的列变量都靠它留在输出之外，
+                                             只剩那一个汇总固定片段成行         */
+    int     multiline;                    /* text：1 = 多行大文本框    */
+    wchar_t time_format[QP_FORMAT_MAX];   /* datetime：格式串，空=默认 */
+    /* 引用：本片段的值直接取自另一个变量（整体或其中一部分）。
+       引用来的值算「推导值」，与规则同级 → 目标在填写界面只读。 */
+    wchar_t ref_segment_id[QP_ID_MAX];    /* 空 = 不引用               */
+    RefMode ref_mode;
+    wchar_t ref_delimiter[QP_SEP_MAX];    /* REF_SPLIT：分隔符         */
+    int     ref_index;                    /* REF_SPLIT：第 N 段，1 起  */
+    int     ref_start;                    /* REF_SUBSTR：第 N 个字，1 起 */
+    int     ref_len;                      /* REF_SUBSTR：取几个字，
+                                             <=0 = 一直取到末尾       */
+    ParseRule *parse_rules;
+    ConditionRule *condition_rules;
+    struct Segment *next;
+} Segment;
+
+typedef struct Template {
+    wchar_t id[QP_ID_MAX];
+    wchar_t name[QP_NAME_MAX];
+    wchar_t group_id[QP_ID_MAX];          /* 空 = 未分组 */
+    int     batch_mode;                   /* 1 = 批量：源变量按行重复整模板渲染，各行以换行合并 */
+    wchar_t batch_source_id[QP_ID_MAX];   /* 批量的源变量片段 id（空=未选） */
+    int     table_output_enabled;         /* 1 = 启用表格格式输出 */
+    wchar_t table_output_format[QP_OUTPUT_MAX]; /* 表格格式：占位符及转义 */
+    Segment *segments;
+    wchar_t created_at[QP_TIME_MAX];
+    wchar_t updated_at[QP_TIME_MAX];
+    struct Template *next;
+} Template;
+
+typedef struct Group {
+    wchar_t id[QP_ID_MAX];
+    wchar_t name[QP_NAME_MAX];
+    int     order;
+    struct Group *next;
+} Group;
+
+/* ------------------------------------------------------------------ */
+/* 数据表（名单 / 联系表）：data.json 里**只存这条引用**，表内容不落进     */
+/* data.json、也不做备份 —— 表始终以磁盘上那个文件为准（每周覆盖同一个     */
+/* 文件即可，所有引用它的规则自动用新数据）。                            */
+/* ------------------------------------------------------------------ */
+typedef enum {
+    QP_ENC_AUTO = 0,      /* 按 BOM / 是否合法 UTF-8 自动判断 */
+    QP_ENC_UTF8 = 1,
+    QP_ENC_GBK = 2,       /* Windows 上 Excel 存的「CSV」多半是这个 */
+    QP_ENC_UTF16 = 3
+} TableEncoding;
+
+typedef enum {
+    QP_DELIM_AUTO = 0,    /* 按首几行里各候选分隔符的列数一致性自动判断 */
+    QP_DELIM_COMMA = 1,
+    QP_DELIM_TAB = 2,     /* 从 Excel 复制出来的就是制表符分隔 */
+    QP_DELIM_SEMI = 3
+} TableDelim;
+
+typedef struct DataTableRef {
+    wchar_t id[QP_ID_MAX];
+    wchar_t name[QP_NAME_MAX];
+    wchar_t path[QP_PATH_MAX];   /* 绝对路径；也可写成相对 data.json 的路径 */
+    int     encoding;            /* TableEncoding */
+    int     delimiter;           /* TableDelim    */
+    int     has_header;          /* 1 = 第一行是列名 */
+    struct DataTableRef *next;
+} DataTableRef;
+
+typedef struct AppData {
+    Group        *groups;
+    Template     *templates;
+    DataTableRef *tables;         /* 数据表清单（只有引用，没有内容） */
+} AppData;
+
+/* 主题 */
+typedef enum { THEME_LIGHT = 0, THEME_DARK = 1, THEME_SYSTEM = 2 } ThemeMode;
+
+typedef struct Settings {
+    unsigned hotkey_mods;                 /* MOD_ALT | MOD_CONTROL ... */
+    unsigned hotkey_vk;                   /* 虚拟键码                  */
+    int      autostart;
+    ThemeMode theme;
+    wchar_t  default_separator[QP_SEP_MAX];
+    int      win_x, win_y, win_w, win_h;  /* 上次窗口位置/尺寸         */
+    int      win_maximized;
+    int      tree_width;                  /* 左侧模板树宽度            */
+    int      preview_height;              /* 口径预览区高度；0 = 自动  */
+    int      editor_w, editor_h;          /* 模板编辑器客户区尺寸；0 = 默认 */
+    int      editor_preview_height;       /* 编辑器里默认值预览的高度；0 = 默认 */
+    int      minimize_to_tray_hint;       /* 是否已提示过「已最小化到托盘」*/
+    wchar_t  data_dir[QP_PATH_MAX];       /* 自定义数据目录；空 = 默认 %APPDATA%\QuickPhrase */
+} Settings;
+
+/* ------------------------------------------------------------------ */
+/* 运行期求值上下文                                                    */
+/* ------------------------------------------------------------------ */
+typedef struct EvalField {
+    const Segment *seg;
+    wchar_t value[QP_VALUE_MAX];        /* 当前生效值（UI 显示 / 输出）*/
+    wchar_t user_value[QP_VALUE_MAX];   /* 用户最近一次手动输入        */
+    int     user_touched;               /* 用户是否手动输入过          */
+    int     choice_tracked, custom_selected;
+    wchar_t custom_value[QP_VALUE_MAX]; /* 本次填写的补充内容，不属于模板选项库 */
+    wchar_t choice_base[QP_VALUE_MAX];  /* 普通勾选值，与补充内容分开保存，避免分隔符误判 */
+    unsigned input_flags;              /* Input was clipped at model capacity. */
+    unsigned value_flags;              /* Truncation local to this field's evaluation. */
+    int     rule_driven;                /* 本次求值是否由规则推导得到
+                                           （规则值优先，手动输入让位）*/
+    int     empty_count;                /* value 里有几处「占位符展开成空」*/
+    int     empty_marks[QP_EMPTY_MARK_MAX]; /* 这些位置在 value 中的下标 */
+} EvalField;
+
+typedef struct EvalContext {
+    const Template *tmpl;
+    EvalField *fields;
+    int count;
+    int unstable;                       /* 1 = 迭代跑满仍未收敛（规则互相
+                                           覆盖），界面据此提示一句     */
+    unsigned output_flags;              /* Intermediate truncation/allocation failure. */
+    struct QpEvalWorkspace *workspace;   /* Owned reusable scratch; never shared by copies. */
+} EvalContext;
+
+typedef enum { QP_RENDER_OK, QP_RENDER_TRUNCATED, QP_RENDER_NOMEM, QP_RENDER_INVALID } QpRenderStatus;
+typedef struct { QpRenderStatus status; size_t written; int mark_count; } QpRenderResult;
+size_t qp_utf16_prefix(const wchar_t *src, size_t length, size_t max_units);
+QpRenderResult qp_eval_render_checked(EvalContext *ctx, OutputMode mode, int batch,
+                                     wchar_t *out, size_t cap, int *marks, int mark_cap);
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* --------------------------- 字符串工具 --------------------------- */
+void     qp_strlcpy(wchar_t *dst, const wchar_t *src, size_t cap);
+int qp_choice_custom_index(const Segment *s);
+int qp_choice_is_checked(const EvalField *field,int option,const wchar_t *sep);
+int qp_choice_join(const Segment *s,const unsigned char *checked,int count,
+                   const wchar_t *custom,const wchar_t *sep,wchar_t *out,size_t cap);
+int qp_choice_set(EvalContext *ctx,int index,const unsigned char *checked,int count,
+                  const wchar_t *custom,const wchar_t *sep);
+/* 口径 A：把「已保存的旧值」投影到 seg 当前的选项集上（模板改了选项后，
+   旧值必须向新选项对齐）。checked 由调用方提供、长度必须是 seg->option_count。
+   返回值：>0 = 保留的项数；0 = 旧值已完全失效（调用方应清空该字段）；
+   -1 = 拆不开/认不出（调用方应保持原值不动，宁可显示旧值也不丢用户输入）。 */
+int qp_choice_realign(const Segment *seg,const wchar_t *value,
+                      const wchar_t *custom_in,const wchar_t *sep,
+                      unsigned char *checked,wchar_t *custom_out,size_t cap);
+int      qp_icmp(const wchar_t *a, const wchar_t *b);
+const wchar_t *qp_istr(const wchar_t *hay, const wchar_t *needle);
+int      qp_istarts(const wchar_t *hay, const wchar_t *prefix);
+int      qp_iends(const wchar_t *hay, const wchar_t *suffix);
+wchar_t *qp_wcsdup(const wchar_t *s);
+void     qp_trim(wchar_t *s);
+int      qp_is_blank(const wchar_t *s);
+/* 按 delimiter 切割 src，取第 index 段（1 起）。成功返回 1 */
+int      qp_split_take(const wchar_t *src, const wchar_t *delim, int index,
+                       wchar_t *out, size_t cap);
+/* 取 before 之后、after 之前的子串（before 空=从头，after 空=到末尾）。
+   找不到标记返回 0。大小写不敏感，与 qp_istr 一致 */
+int      qp_between_take(const wchar_t *src, const wchar_t *before,
+                         const wchar_t *after, wchar_t *out, size_t cap);
+/* --------------------------- 占位符 --------------------------------
+   固定片段的内容里可以写 {变量名}，生成时换成那个变量此刻的值。
+   {{ 输出一个字面的 {；认不出的名字原样保留（写错了要看得见）；换进来的
+   内容里若还有 {…} 不再展开（只替换一层）。详见 engine.c 里的说明。      */
+/* 取值回调：认不出这个名字就返回 NULL */
+typedef const wchar_t *(*QpPlaceholderLookup)(void *user, const wchar_t *name);
+size_t   qp_expand_placeholders(const wchar_t *src, QpPlaceholderLookup lookup,
+                                void *user, wchar_t *out, size_t cap);
+/* 依次取出 src 里第 index 个占位符的名字（0 起），没有了返回 0。体检用 */
+int      qp_placeholder_at(const wchar_t *src, int index, wchar_t *name, size_t cap);
+/* 生成唯一 id（prefix + 计数 + 时间） */
+void     qp_new_id(wchar_t *out, size_t cap, const wchar_t *prefix);
+/* 生成 ISO 时间戳 */
+void     qp_now_iso(wchar_t *out, size_t cap);
+/* 按格式串输出时间：yyyy yy MM M dd d HH H mm m ss s ddd(周一)，
+   其余字符原样保留；fmt 为空时用 yyyy-MM-dd HH:mm:ss */
+void     qp_format_time(const struct tm *tmv, const wchar_t *fmt,
+                        wchar_t *out, size_t cap);
+void     qp_format_time_now(const wchar_t *fmt, wchar_t *out, size_t cap);
+/* 时间格式的预置列表（编辑器下拉用） */
+int      qp_time_format_count(void);
+const wchar_t *qp_time_format_at(int index);
+
+/* --------------------------- 结构体生命周期 ----------------------- */
+Segment       *seg_create(SegmentType type);
+void           seg_free(Segment *s);
+Segment       *seg_clone(const Segment *s);
+void           seg_set_options(Segment *s, const wchar_t *const *opts, int count);
+int            qp_seg_set_options(Segment *s, const wchar_t *const *opts, int count);
+int            qp_seg_add_option(Segment *s, const wchar_t *opt);
+void           seg_add_option(Segment *s, const wchar_t *opt);
+void           seg_remove_option(Segment *s, int index);
+int            seg_move_option(Segment *s, int index, int delta);
+const wchar_t *seg_display_name(const Segment *s);   /* 供 UI 显示 */
+/* 按 s 的引用配置从来源值 src 里取出要用的那部分 */
+void           seg_ref_extract(const Segment *s, const wchar_t *src,
+                               wchar_t *out, size_t cap);
+/* 引用摘要文字（「引用[设备编号]按“-”取第 7 段」），无引用时输出空串 */
+void           seg_ref_summary(const Segment *s, const Template *t,
+                               wchar_t *out, size_t cap);
+/* target 若引用 source_id 会不会形成环（含自引用）。1 = 会，别让它保存 */
+int            tmpl_ref_would_cycle(const Template *t, const Segment *target,
+                                    const wchar_t *source_id);
+
+ParseRule     *parse_rule_create(void);
+void           parse_rule_free(ParseRule *r);
+ParseRule     *parse_rule_clone(const ParseRule *r);
+/* Consume a standalone candidate; retain destination id and list position. */
+void           qp_parse_rule_take(ParseRule *dst, ParseRule *owned);
+
+/* 查表规则的「输出对」：表里的哪一列 → 填进哪个变量 */
+LookupOut     *lookup_out_create(void);
+void           lookup_out_free(LookupOut *o);
+int            lookup_out_count(const LookupOut *head);
+LookupOut     *lookup_out_at(LookupOut *head, int index);
+void           lookup_out_append(LookupOut **head, LookupOut *o);
+int            lookup_out_remove_at(LookupOut **head, int index);
+void           lookup_out_list_free(LookupOut *head);
+LookupOut     *lookup_out_clone_list(const LookupOut *head);
+/* 摘要文字（规则列表里显示用）：如「查表[值班表] 键=设备编号 → 联系人、电话」 */
+void           lookup_rule_summary(const ParseRule *r, const Template *t,
+                                   wchar_t *out, size_t cap);
+
+ConditionRule *cond_rule_create(void);      /* 自带一个空白条件项 */
+void           cond_rule_free(ConditionRule *r);
+ConditionRule *cond_rule_clone(const ConditionRule *r);
+/* 把 src 的内容整体搬进 dst，保留 dst 的 id 与在链表中的位置 */
+void           cond_rule_assign(ConditionRule *dst, const ConditionRule *src);
+void           qp_cond_rule_take(ConditionRule *dst, ConditionRule *owned);
+/* 便捷：整条规则只用一个条件项（老版本的单条件写法） */
+void           cond_rule_set_simple(ConditionRule *r, const wchar_t *trigger_id,
+                                    CondOperator op, int negate, const wchar_t *match);
+
+CondTerm      *cond_term_create(void);
+void           cond_term_free(CondTerm *t);
+CondTerm      *cond_term_clone(const CondTerm *t);
+/* 设置匹配值：OP_IN 时按 , ，、; 拆成列表 */
+void           cond_term_set_match(CondTerm *t, const wchar_t *raw);
+int            qp_cond_term_set_match(CondTerm *t, const wchar_t *raw);
+int            cond_term_count(const CondTerm *head);
+CondTerm      *cond_term_at(CondTerm *head, int index);
+void           cond_term_append(CondTerm **head, CondTerm *t);
+int            cond_term_remove_at(CondTerm **head, int index);
+void           cond_term_list_clear(CondTerm **head);
+
+Template      *tmpl_create(const wchar_t *name);
+void           tmpl_free(Template *t);
+Template      *tmpl_clone(const Template *t);
+
+Group         *group_create(const wchar_t *name);
+void           group_free(Group *g);
+
+AppData       *appdata_create(void);
+void           appdata_free(AppData *d);
+AppData       *appdata_create_seed(void);   /* 首次运行的示例数据 */
+/* 复杂示例模板：把全部功能（隐藏变量 / 多行文本 / 两类解析规则 / 多条件项
+   规则）都用上，首次运行时随示例数据一起装，也可从「模板」菜单再插一份 */
+Template      *tmpl_create_demo(void);
+
+/* --------------------------- 链表操作 ----------------------------- */
+int      seg_list_count(const Segment *head);
+Segment *seg_list_at(Segment *head, int index);
+int      seg_list_index_of(Segment *head, const Segment *s);
+void     seg_list_append(Segment **head, Segment *s);
+void     seg_list_insert_at(Segment **head, Segment *s, int index);
+Segment *seg_list_remove_at(Segment **head, int index);   /* 返回被摘下的节点 */
+int      seg_list_move(Segment **head, int from, int to);
+
+int      tmpl_list_count(const Template *head);
+Template *tmpl_list_at(Template *head, int index);
+void     tmpl_list_append(Template **head, Template *t);
+Template *tmpl_list_find(Template *head, const wchar_t *id);
+int      tmpl_list_remove(Template **head, const wchar_t *id); /* 并释放 */
+int      tmpl_list_replace(Template **head, Template *newer);  /* 按 id 原地替换 */
+
+int      group_list_count(const Group *head);
+Group   *group_list_at(Group *head, int index);
+void     group_list_append(Group **head, Group *g);
+Group   *group_list_find(Group *head, const wchar_t *id);
+int      group_list_remove(Group **head, const wchar_t *id);
+
+DataTableRef *dtref_create(const wchar_t *name, const wchar_t *path);
+void          dtref_free(DataTableRef *r);
+int           dtref_list_count(const DataTableRef *head);
+DataTableRef *dtref_list_at(DataTableRef *head, int index);
+DataTableRef *dtref_list_find(DataTableRef *head, const wchar_t *id);
+void          dtref_list_append(DataTableRef **head, DataTableRef *r);
+int           dtref_list_remove(DataTableRef **head, const wchar_t *id);
+void          dtref_list_free(DataTableRef *head);
+
+int      parse_rule_count(const ParseRule *head);
+ParseRule *parse_rule_at(ParseRule *head, int index);
+void     parse_rule_append(ParseRule **head, ParseRule *r);
+int      parse_rule_remove_at(ParseRule **head, int index);
+int      parse_rule_move(ParseRule **head, int from, int to);
+
+int      cond_rule_count(const ConditionRule *head);
+ConditionRule *cond_rule_at(ConditionRule *head, int index);
+void     cond_rule_append(ConditionRule **head, ConditionRule *r);
+int      cond_rule_remove_at(ConditionRule **head, int index);
+int      cond_rule_move(ConditionRule **head, int from, int to);
+
+/* --------------------------- 规则引擎 ----------------------------- */
+EvalContext *eval_create(const Template *t);
+void         eval_destroy(EvalContext *ctx);
+void         eval_reset(EvalContext *ctx);                 /* 回到默认值 */
+int          eval_index_of_id(const EvalContext *ctx, const wchar_t *id);
+int          eval_index_of_label(const EvalContext *ctx, const wchar_t *label);
+/* 用户输入（规则推导出值时以规则为准），随后需调用 eval_run */
+void         eval_set_user_value(EvalContext *ctx, int idx, const wchar_t *v);
+/* 执行解析规则 + 条件规则，迭代至稳定 */
+void         eval_run(EvalContext *ctx);
+/* Workspace allocation failure never commits a partial evaluation. */
+int          qp_eval_run_checked(EvalContext *ctx);
+/* 指定输出格式渲染；表格格式未启用或为空时返回空。 */
+/* 表格标记为原文偏移，仅报告规则失配，合法空值不标错。 */
+size_t eval_render_mode_marked(EvalContext *ctx, OutputMode mode, wchar_t *out, size_t cap,
+                               int *marks, int mark_cap, int *mark_count);
+size_t eval_render_batch_mode_marked(EvalContext *ctx, OutputMode mode, wchar_t *out, size_t cap,
+                                     int *marks, int mark_cap, int *mark_count);
+size_t       eval_render_mode(EvalContext *ctx, OutputMode mode,
+                              wchar_t *out, size_t cap);
+/* 预览专用：普通文本渲染，并把「本该有值却空着」的位置记进 marks
+   （相对 out 的字符下标，最多 mark_cap 条，*mark_count 写回实际条数）。
+   两类算是失败：①固定内容里的 {变量} 展开成空串；②某个变量的值是空的，
+   而它正是某条解析规则的目标（= 解析规则没命中）。取值总则不受影响，
+   这里只是把「哪儿缺了」指给界面看。 */
+size_t       eval_render_text_marked(EvalContext *ctx, wchar_t *out, size_t cap,
+                                     int *marks, int mark_cap, int *mark_count);
+/* 批量版的文本渲染 + 失败位置（逐行求值，标记位置已折算成整段输出里的下标） */
+size_t       eval_render_batch_text_marked(EvalContext *ctx, wchar_t *out, size_t cap,
+                                           int *marks, int mark_cap, int *mark_count);
+/* 拼接输出 */
+size_t       eval_render(const EvalContext *ctx, wchar_t *out, size_t cap);
+/* 指定输出格式的批量渲染；结束后恢复 ctx 的完整源输入。 */
+size_t       eval_render_batch_mode(EvalContext *ctx, OutputMode mode,
+                                    wchar_t *out, size_t cap);
+/* 批量渲染：模板开了 batch_mode 时，把源变量的值按换行拆成多行，逐行注入源变量后
+   各渲染一遍，结果以换行合并（常量列不变、源派生列逐行变）。未开批量或源为空时
+   等同 eval_render。会临时改动并还原 ctx（结束后 ctx 与整段已粘贴一致）。 */
+size_t       eval_render_batch(EvalContext *ctx, wchar_t *out, size_t cap);
+/* 便捷：按默认值渲染（模板编辑器预览用） */
+size_t       tmpl_render_defaults(const Template *t, wchar_t *out, size_t cap);
+
+/* 供 UI / 存储层复用的枚举名称 */
+const wchar_t *seg_type_name(SegmentType t);
+const wchar_t *parse_type_name(ParseRuleType t);
+const wchar_t *cond_op_name(CondOperator op);              /* 包含 / 等于 …   */
+const wchar_t *cond_op_phrase(CondOperator op, int negate);/* 不包含 / 不为空 … */
+int            cond_op_needs_value(CondOperator op);       /* OP_EMPTY 不需要值 */
+/* 规则摘要文字（列表显示用） */
+void parse_rule_summary(const ParseRule *r, const Template *t, wchar_t *out, size_t cap);
+void cond_rule_summary(const ConditionRule *r, const Template *t, wchar_t *out, size_t cap);
+void cond_term_summary(const CondTerm *term, const Template *t, wchar_t *out, size_t cap);
+/* 按 id 找片段（用于把 id 显示成变量名） */
+const Segment *tmpl_find_segment(const Template *t, const wchar_t *id);
+
+/* --------------------------- 模板体检 ------------------------------
+   保存模板时跑一遍，挑出「配好了但永远不会生效」的规则。只报能证明的：
+   条件是否成立由引擎自己的判定函数说话，触发变量的取值穷举不了就不报，
+   宁可漏报也不冤枉一条好规则。不阻止保存，只提醒。                     */
+#define QP_LINT_MAX 20                /* 一次最多报这么多条，够看了 */
+
+typedef enum {
+    LINT_COND_NEVER = 0,      /* 条件永远不成立            */
+    LINT_COND_NOTERM,         /* 规则一个条件都没有        */
+    LINT_COND_DANGLING,       /* 条件指向的变量没选/已删除 */
+    LINT_COND_EMPTY,          /* 命中后把这一段变成空      */
+    LINT_PARSE_DANGLING,      /* 解析规则的目标已删除      */
+    LINT_PARSE_REGEX,         /* 正则规则没填模式 / 模式语法有误 */
+    LINT_PARSE_NONTEXT,       /* 解析规则挂在非文本变量上，永远不会运行 */
+    LINT_LOOKUP_SETUP,        /* 查表规则没配齐（没选表/没选列/没有输出对） */
+    LINT_LOOKUP_TABLE,        /* 引用的数据表不存在，或表文件读不了 */
+    LINT_LOOKUP_COL,          /* 键列 / 取值列在表里找不到 */
+    LINT_LOOKUP_TARGET,       /* 查表的输出目标变量已删除  */
+    LINT_LOOKUP_DUPKEY,       /* 键列重复较多，提醒当前命中策略 */
+    LINT_PLACEHOLDER,         /* 占位符名字认不出来        */
+    LINT_BATCH_SOURCE         /* 批量模式的源变量没选/已删除/不是文本变量 */
+} LintKind;
+
+typedef struct {
+    LintKind kind;
+    int      seg_index;              /* 片段序号，0 起 —— 界面据此跳过去 */
+    int      rule_index;             /* 规则序号，0 起；-1 = 与规则无关   */
+    wchar_t  text[QP_RESULT_MAX];    /* 已经写成人话的一句描述            */
+} LintIssue;
+
+/* 返回写进 out 的条数（最多 cap 条）。LintIssue 不小，别放栈上 */
+int tmpl_lint(const Template *t, LintIssue *out, int cap);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* QP_ENGINE_H */

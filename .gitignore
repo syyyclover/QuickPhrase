@@ -17,6 +17,8 @@
 *.a
 *.lib
 *.pdb
+__pycache__/
+*.pyc
 
 # 本地工具/编辑器配置
 /.claude/
@@ -33,6 +35,7 @@ desktop.ini
 # 本地工具会话目录（superpowers 的过程记录、审查 diff，属于本机工作痕迹）
 /.superpowers/
 /.agents/
+/.local-notes/
 
 # 开发需求文档（本地保留，不进版本库）
 /QuickPhrase.md

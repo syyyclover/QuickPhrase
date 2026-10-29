@@ -1,7 +1,7 @@
 /*
  * test_launch.c —— 启动策略自测（不依赖 Windows API，本机 gcc 即可运行）
  */
-#include "../src/launch.h"
+#include "launch.h"
 
 #include <stdio.h>
 

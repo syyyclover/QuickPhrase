@@ -1,7 +1,7 @@
 /*
  * test_regex.c —— 内置正则引擎自测（纯 C，本机 gcc 即可运行）
  */
-#include "../src/regex.h"
+#include "regex.h"
 
 #include <locale.h>
 #include <stdio.h>

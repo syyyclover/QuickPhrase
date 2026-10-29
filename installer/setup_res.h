@@ -27,7 +27,8 @@
 
 #define QP_PRODUCT   L"口径生成器 QuickPhrase"
 #define QP_SHORT     L"口径生成器"
-#define QP_VERSION   L"3.3.0"
+#include "version.h"
+#define QP_VERSION   QP_VERSION_WIDE
 #define QP_EXE_NAME  L"QuickPhrase.exe"
 #define QP_UNI_NAME  L"uninstall.exe"
 #define QP_EXIT_MSG  L"QuickPhrase.RequestExit"
