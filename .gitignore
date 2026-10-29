@@ -37,6 +37,10 @@ desktop.ini
 /.agents/
 /.local-notes/
 
+# 测试与开发记录仅本地保留，不上传仓库
+/tests/
+/docs/
+
 # 开发需求文档（本地保留，不进版本库）
 /QuickPhrase.md
 # 说明：tests/ 已纳入版本库 —— make test 自给自足（验收夹具不在时会明确打印「跳过」）
